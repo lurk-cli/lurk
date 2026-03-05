@@ -1,25 +1,40 @@
 <p align="center">
-  <img src="assets/lurk.png" alt="lurk" width="400" />
+  <img src="https://raw.githubusercontent.com/zasanao/lurk/main/assets/lurk.png" alt="lurk" width="400" />
 </p>
-<p align="center"><strong>Your AI agents have no idea what each other are doing. lurk fixes that.</strong></p>
+
+<p align="center"><strong>Your AI agents have no idea what each other are doing.</strong></p>
 
 <p align="center">
-  <a href="#get-started">Get started</a> &middot;
-  <a href="#how-it-works">How it works</a> &middot;
+  <a href="#get-started">Get Started</a> &middot;
+  <a href="#how-it-works">How It Works</a> &middot;
   <a href="#commands">Commands</a> &middot;
   <a href="#mcp-tools">MCP Tools</a> &middot;
-  <a href="#configuration">Configuration</a>
+  <a href="#your-data-stays-yours">Privacy</a>
 </p>
 
 ---
 
-lurk is a **context broker for AI tools**. It silently observes your desktop — VS Code, iTerm, Chrome, Slack, Notion, Figma, Gmail, Linear, and 30+ other apps — and makes that context available to every AI agent you work with.
+<!-- TODO: hero demo GIF here -->
 
-Claude Code doesn't know what you just read in Slack. Cursor doesn't know what Claude Code just refactored. OpenClaw doesn't know you already fixed the bug it's about to file. lurk sees all of it and gives every tool the full picture.
+```
+$ lurk context -p
 
-**Context evolves across agents.** When Claude Code builds something, it feeds back what it decided and why. When you switch to ChatGPT, ChatGPT doesn't just get "the user was coding" — it gets the full picture of what was built, what decisions were made, and what's still open. Each prompt builds on the previous one.
+The user is working on the api project (TypeScript). Key decisions: chose JWT
+with RS256 over session auth. Claude Code: built JWT middleware with token
+rotation. Code changes: created auth/middleware.ts; modified server/http.ts.
+They recently researched JWT refresh token rotation on Stack Overflow.
+Related ticket: AUTH-142.
+```
 
-**No integrations. No plugins. No API keys to configure.** lurk works by reading window titles and app states — the same information already visible on your screen.
+lurk silently observes your desktop — VS Code, iTerm, Chrome, Slack, Notion, Figma, Gmail, Linear, and 30+ apps — and makes that context available to every AI agent you use.
+
+When Claude Code finishes a refactor, it feeds back what it decided. When you switch to ChatGPT, ChatGPT already knows what was built, what decisions were made, and what's still open. When Cursor picks up the thread, it doesn't start from zero.
+
+**100% local. No cloud. No telemetry. No accounts. Your data never leaves your machine.**
+
+---
+
+## What this looks like
 
 ```
 $ lurk agents
@@ -32,55 +47,108 @@ Active AI Agents
 │ Cursor Agent │ working      │ dashboard │ 6m       │ component generation     │
 │ OpenClaw     │ working      │ api       │ 41m      │ triage + issue responses │
 └──────────────┴──────────────┴───────────┴──────────┴──────────────────────────┘
-
-Attention Queue
-┌──────────┬─────────────┬────────────────────────────────────┬─────────┐
-│ Priority │ Agent       │ Reason                             │ Waiting │
-├──────────┼─────────────┼────────────────────────────────────┼─────────┤
-│ 1        │ Claude Code │ Completed — waiting for review     │ 12m     │
-└──────────┴─────────────┴────────────────────────────────────┴─────────┘
-
-$ lurk context
-
-  coding in VS Code
-  File: auth-middleware.ts
-  Project: api
-  Language: TypeScript
-  Intent: implementing
-  Duration: 47m
-  Input: typing
-  Interruptibility: low
 ```
 
-## Why
+<!-- TODO: agents demo GIF -->
 
-A real morning looks like this: You open Claude Code in iTerm to refactor the auth middleware. While it works, you switch to Cursor to build out the dashboard components. You have OpenClaw running in a Chrome tab, triaging GitHub issues and responding to bug reports on your behalf. You flip to Notion to update the sprint doc. A Slack notification pulls you into a thread about a deploy. You check Gmail for the security audit response. Then you go back to Claude Code — which finished 8 minutes ago — and can't remember what it changed.
+```
+$ lurk workflows
 
-Every tool you touch is an island. Claude Code doesn't know you just read a Slack thread about the deploy failing. Cursor doesn't know Claude Code just rewrote the auth module it depends on. OpenClaw is filing issues against code that Claude Code already fixed. You're the only one holding context across all of them, and you're losing it every time you switch windows.
+┌────┬─────────────────────┬────────────┬──────────────────────────────────────────┐
+│ ID │ Workflow             │ Tools      │ Context                                  │
+├────┼─────────────────────┼────────────┼──────────────────────────────────────────┤
+│  3 │ api / auth / jwt     │ CC, Cursor │ JWT middleware, token rotation, RS256     │
+│  7 │ Q3 revenue review    │ Docs, Chat │ spreadsheet analysis, email thread        │
+└────┴─────────────────────┴────────────┴──────────────────────────────────────────┘
+```
 
-lurk fixes this by watching what's already on your screen and making that context available to every tool — without any of them needing to talk to each other.
+<!-- TODO: workflows demo GIF -->
 
-### What this looks like in practice
+```
+$ lurk changes
 
-**Cross-agent context transfer.** You finish reviewing Claude Code's auth refactor in iTerm and switch to Cursor to work on the dashboard. Cursor calls lurk's MCP server and instantly knows: *"The user just finished an auth refactor with Claude Code — auth-middleware.ts, auth-utils.ts, and auth.test.ts were modified in the api project. The dashboard component you're building imports from the auth module that was just changed."*
+In api (branch: feat/auth):
+  Created auth/middleware.ts (typescript):
+    export async function authMiddleware(req, res, next) {
+      const token = req.headers.authorization?.split(' ')[1];
+      const payload = await verifyJWT(token, { algorithms: ['RS256'] });
+      req.user = payload;
+      next();
+    }
+  Modified server/http.ts:
+    Added: app.use('/api', authMiddleware)
+    Removed: // TODO: add auth
+```
 
-**Agent attention queue.** Claude Code has been waiting for your review for 12 minutes. Cursor is still actively generating. OpenClaw is running fine. Instead of checking each one manually, `lurk agents` shows you exactly who needs you and in what order.
+<!-- TODO: changes demo GIF -->
 
-**Full-stack awareness.** lurk sees everything: the Linear ticket (AUTH-142) you had open, the Stack Overflow page about JWT refresh tokens you researched in Arc, the 35-minute focused coding session in VS Code, the Figma mockup you referenced, the Slack thread where the team discussed the deploy. When any AI tool asks for context, it gets the full picture — not just what happened inside its own window.
+---
 
-**Context recovery.** You come back from a Zoom standup and can't remember what was running. `lurk agents` shows: *"Claude Code completed auth refactor (waiting for review since 10:15 AM). Cursor agent is still generating dashboard components (28 minutes in). OpenClaw processed 4 issues while you were away."*
+## The Problem
 
-**Evolving context.** Claude Code finishes the auth refactor and calls `add_workflow_context(type="decision", content="Chose JWT with RS256 over session auth — API is stateless")`. When you switch to ChatGPT to discuss the deployment strategy, ChatGPT's context includes that decision. When you later open Cursor to build the dashboard, Cursor knows the auth layer uses JWT with RS256 without you explaining it again.
+Claude Code doesn't know what you just read in Slack. Cursor doesn't know Claude Code just rewrote the auth module it depends on. OpenClaw is filing issues against code that Claude Code already fixed.
 
-## How it works
+Every tool is an island. You're the only one holding context across all of them, and you're losing it every time you switch windows.
 
-lurk has three layers:
+## The Fix
 
-1. **A native macOS daemon** (Swift) that observes your desktop at 3-second intervals — active app, window title, input state, display layout. Events are stored locally in a SQLite database at `~/.lurk/store.db`. Everything stays on your machine.
+lurk watches what's already on your screen and makes that context available to every tool — without any of them needing to talk to each other.
 
-2. **A Python context engine** that enriches raw events into structured context — parsing window titles to extract file names, project names, languages, tickets, and AI agent states. It clusters activity into **workflows** that accumulate context over time.
+**Cross-agent context.** Switch from Claude Code to Cursor — Cursor instantly knows what was just refactored, which files changed, and what decisions were made.
 
-3. **A feedback loop** — agents can write back decisions, findings, and summaries via MCP or HTTP, so the next agent starts with full context.
+**Evolving workflows.** Context isn't a snapshot, it's a thread. Each agent builds on what the last one contributed. Decisions, findings, blockers, and summaries accumulate across tools.
+
+**Agent attention queue.** Claude Code finished 8 minutes ago. Cursor is still generating. OpenClaw is running fine. `lurk agents` shows who needs you and in what order.
+
+**Works for everything.** Coding, research, email, spreadsheets, design, writing — lurk sees all of it and connects the dots.
+
+No integrations. No plugins. No API keys to configure.
+
+---
+
+## Get Started
+
+**Requirements:** macOS 13+
+
+```bash
+pip install 'lurk[all]'
+
+lurk onboard --install-daemon
+```
+
+The onboard wizard builds the native daemon, configures auto-start, prompts for Accessibility permission, and detects installed AI tools to automatically set up MCP.
+
+```bash
+lurk status      # daemon running?
+lurk context -p  # what does lurk see?
+```
+
+### Connect AI tools
+
+```bash
+lurk connect claude-code   # Claude Code MCP
+lurk connect cursor        # Cursor MCP
+lurk connect codex         # Codex CLI
+```
+
+### Browser extension
+
+For ChatGPT, Claude.ai, Gemini, and Copilot in the browser:
+
+1. `lurk serve-http`
+2. Chrome → `chrome://extensions` → Developer Mode → Load Unpacked → select `extension/`
+3. A lurk button appears near any AI chat input — click to inject context
+
+### Quick copy
+
+```bash
+lurk copy                  # copy context to clipboard
+lurk copy --watch          # auto-update every 30s
+```
+
+---
+
+## How It Works
 
 ```
 Observations ──→ Workflow Context ──→ Prompt Generation ──→ Agent
@@ -89,89 +157,158 @@ Observations ──→ Workflow Context ──→ Prompt Generation ──→ Ag
      └──────────── Agent Output Feedback ←─────────────────────┘
 ```
 
-```
-┌───────────────────────────────────────────────────────────────────┐
-│                          Your Desktop                             │
-│  iTerm2 · VS Code · Cursor · Chrome · Slack · Notion · Figma ... │
-└──────────────────────────────┬────────────────────────────────────┘
-                   │ window titles, app switches
-                   ▼
-         ┌─────────────────┐
-         │   lurk-daemon   │  Swift · macOS native
-         │   (observer)    │  accessibility API
-         └────────┬────────┘
-                  │ raw events → SQLite
-                  ▼
-         ┌─────────────────┐
-         │  context engine  │  Python · parsers
-         │  (enrichment)    │  classifiers · LLM
-         └────────┬────────┘
-                  │ structured context
-          ┌───────┴───────┐
-          ▼               ▼
-   ┌────────────┐  ┌────────────┐
-   │ MCP Server │  │ HTTP API   │
-   │ (stdio)    │  │ :4141      │
-   └──────┬─────┘  └──────┬─────┘
-          │               │
-          ▼               ▼
-    Claude Code      ChatGPT, scripts,
-    Cursor           dashboards, etc.
-          │               │
-          └───────┬───────┘
-                  │ feedback (decisions,
-                  │ findings, summaries)
-                  ▼
-         ┌─────────────────┐
-         │   Workflow       │  Context accumulates
-         │   (evolving)     │  across agents
-         └─────────────────┘
-```
+**1. Observe.** A native macOS daemon watches your desktop every 3 seconds — active app, window title, input state, display layout. A browser extension captures page content. Git and session watchers track what agents actually build.
+
+**2. Enrich.** Raw events are parsed into structured context — file names, projects, languages, tickets, agent states, activity types, research topics.
+
+**3. Cluster.** Activity is grouped into **workflows** by topic overlap. A workflow might span Claude Code, Stack Overflow, a Google Doc, and a Slack thread — all connected because they're about the same thing.
+
+**4. Serve.** Any AI tool can request context via MCP or HTTP. The prompt includes everything the workflow has accumulated.
+
+**5. Feedback.** Agents write back what they decided, found, or built. The next agent starts with full context, not a blank slate.
 
 ### What lurk observes
 
 | Signal | Source | Example |
 |--------|--------|---------|
-| Active app | macOS APIs | `VS Code`, `iTerm2`, `Chrome`, `Slack`, `Notion` |
+| Active app | macOS APIs | VS Code, iTerm2, Chrome, Slack, Notion |
 | Window title | Accessibility API | `auth-middleware.ts — api — VS Code` |
 | Input state | Event taps | typing, idle, mouse-only |
 | Display layout | CoreGraphics | which app on which monitor |
-| Calendar | EventKit | meeting in 5 minutes |
+| Code changes | Git watcher | actual diffs, not just commit messages |
+| Agent sessions | Session watcher | Claude Code conversation logs |
+| Page content | Browser extension | viewport text, typing, selections |
 
 ### What lurk infers
 
-- **Files and projects** — parsed from VS Code, Cursor, Xcode, JetBrains, and terminal titles
-- **Languages** — from file extensions (`auth-middleware.ts` → TypeScript)
-- **Activity type** — coding, researching, communicating, designing, writing, meeting, planning, spreadsheet work
-- **Google Workspace** — document names from Docs, Sheets, Slides; Gmail compose vs. triage vs. reading; Calendar events; Meet calls
-- **AI agent states** — Claude Code working, Cursor generating, Codex running, ChatGPT active
-- **Intent** — debugging, implementing, reviewing, researching
-- **Interruptibility** — deep focus (35 min in VS Code) vs. casual browsing (skimming Reddit)
-- **Tickets** — JIRA/Linear IDs from branch names, editor titles, and browser tabs
-- **Research trail** — Stack Overflow pages, MDN docs, GitHub issues you visited
-- **Communication context** — which Slack workspace/channel, Gmail composing vs. triaging, Notion page being edited
+| Signal | How |
+|--------|-----|
+| Files and projects | Parsed from VS Code, Cursor, Xcode, JetBrains, terminal titles |
+| Languages | File extensions — `auth-middleware.ts` → TypeScript |
+| Activity type | Coding, researching, communicating, designing, writing, meeting |
+| AI agent states | Claude Code working, Cursor generating, ChatGPT active |
+| Intent | Debugging, implementing, reviewing, researching |
+| Tickets | JIRA/Linear IDs from branches, editor titles, browser tabs |
+| Research trail | Stack Overflow, MDN, GitHub issues visited |
+| Google Workspace | Docs, Sheets, Slides names; Gmail compose/triage/reading |
 
-### Agent detection
+### Agents detected automatically
 
-lurk recognizes AI agents from observable signals without any integration:
-
-| Agent | Detection method |
-|-------|-----------------|
-| Claude Code | Terminal title: `claude — Thinking...`, `claude — Allow tool?` |
-| Codex | Terminal title: `codex` CLI patterns |
-| ChatGPT | Browser tab title: `ChatGPT` |
+| Agent | Signal |
+|-------|--------|
+| Claude Code | Terminal: `claude — Thinking...`, `claude — Allow tool?` |
 | Cursor | Window title during composer/agent mode |
+| Codex | Terminal: `codex` CLI patterns |
+| ChatGPT | Browser tab: `ChatGPT` |
 | Copilot | Editor integration and browser tab patterns |
-| Copilot Workspace | Browser tab title patterns |
-| Aider | Terminal title: `aider — Thinking` |
-| OpenClaw / MyClaw | Browser tab title patterns |
+| Aider | Terminal: `aider — Thinking` |
 | Goose | Terminal title patterns |
 
-Agent states are inferred from title changes over time — a burst of rapid file changes means "working", a stable title after a burst means "completed", no change for an unusually long time means "possibly stuck".
+---
 
-### Observers
+## Commands
 
-lurk uses a generic **WorkflowObserver** protocol. Built-in observers poll git repos for diffs, read Claude Code session logs, and receive browser extension captures. Adding a new context source (Slack, Google Docs, email, etc.) is one class:
+```
+lurk onboard          Guided setup — daemon, permissions, AI tool connections
+lurk start            Start the daemon and context engine
+lurk stop             Stop everything
+lurk status           Show daemon status and event counts
+
+lurk context          Current context snapshot
+lurk context -p       Natural language context prompt
+lurk agents           Active AI agents and attention queue
+lurk workflows        Active workflows with context trail
+lurk changes          Actual code diffs written by agents
+lurk projects         Detected projects with activity stats
+lurk log              Recent raw events
+lurk search <term>    Search event history
+
+lurk pause            Pause observation
+lurk resume           Resume observation
+
+lurk copy             Copy context to clipboard
+lurk copy --watch     Keep clipboard updated every 30s
+lurk connect <tool>   Connect an AI tool (claude-code, cursor, codex)
+lurk serve-mcp        MCP server (stdio)
+lurk serve-http       HTTP API at localhost:4141
+
+lurk config           Open config in $EDITOR
+lurk install          Set up auto-start on login
+lurk uninstall        Remove auto-start
+lurk purge            Clean up old data
+lurk delete           Delete captured events
+lurk debug <title>    Test a title through the parser pipeline
+```
+
+---
+
+## MCP Tools
+
+When connected via MCP, agents can call:
+
+| Tool | What it does |
+|------|-------------|
+| `get_context_prompt` | Natural language briefing with workflow context — inject into system prompts |
+| `get_current_context` | What the user is doing right now |
+| `get_session_context` | Full work session — projects, files, research, focus blocks |
+| `get_workflows` | All detected workflows with topics, tools, and context |
+| `get_workflow_context` | Full accumulated context for a specific workflow |
+| `get_active_workflow_prompt` | Synthesized prompt from the active workflow |
+| `add_workflow_context` | **Feed back** decisions, findings, blockers, summaries, questions |
+| `get_recent_code_changes` | Actual diffs of what agents wrote |
+| `get_code_changes_summary` | Readable summary of recent code changes |
+| `get_agent_session_context` | What happened in the last agent conversation |
+| `get_agent_status` | All tracked AI agent sessions and states |
+| `get_attention_queue` | Agents needing human attention, priority-sorted |
+| `get_agent_context_for_handoff` | Context briefing for agent-to-agent handoff |
+| `get_project_context` | Deep context for a specific project |
+| `get_workflow_summary` | High-level view of concurrent work streams |
+
+### The feedback loop
+
+Agents don't just consume context — they contribute to it:
+
+```python
+# Claude Code records a decision
+add_workflow_context(type="decision", content="JWT with RS256 — API is stateless")
+
+# Next agent's get_context_prompt() includes:
+# "Key decisions: JWT with RS256 for auth."
+```
+
+| Type | Purpose |
+|------|---------|
+| `decision` | Architectural or design choice made |
+| `finding` | Research discovery or technical insight |
+| `blocker` | Something blocking progress |
+| `summary` | What was just accomplished |
+| `question` | Open question for follow-up |
+
+---
+
+## HTTP API
+
+```bash
+curl localhost:4141/context/prompt           # natural language context
+curl localhost:4141/context/workflow-prompt   # active workflow context
+curl localhost:4141/context/now              # current activity (JSON)
+curl localhost:4141/workflows                # list workflows
+curl localhost:4141/agents                   # agent status
+curl localhost:4141/changes/summary          # what agents built
+
+# Feed back context from an agent
+curl -X POST localhost:4141/context/feedback \
+  -H 'Content-Type: application/json' \
+  -d '{"type": "decision", "content": "Chose JWT over session auth"}'
+```
+
+---
+
+## Extending lurk
+
+### Custom observers
+
+lurk uses a generic `WorkflowObserver` protocol. Adding a new context source is one class:
 
 ```python
 from lurk.observers import WorkflowObserver, WorkflowUpdate
@@ -180,253 +317,93 @@ class SlackObserver:
     def check(self) -> list[WorkflowUpdate]:
         return [WorkflowUpdate(
             keywords=["project-alpha", "deployment"],
-            breadcrumb="discussing Project Alpha deployment in #engineering",
+            breadcrumb="discussing deployment in #engineering",
             tool="Slack",
         )]
 ```
 
-### Workflows
+Built-in observers: **git watcher** (actual diffs), **session watcher** (Claude Code logs), **browser extension** (page content).
 
-Activity is clustered into **workflows** — coherent threads of work that span tools and time. A workflow might include Claude Code building auth middleware, a Stack Overflow search about JWT, a Google Doc with the API design, and a Slack thread about the deploy — all connected by topic overlap.
+### LLM-enhanced context
 
-Each workflow accumulates structured context: breadcrumbs, agent contributions, research, code changes, documents, and key decisions. When you switch tools, the next agent gets the full evolving picture, not just a snapshot.
-
-## Get started
-
-**Requirements:** macOS 13+, Node.js 24+
+Optional — lurk works without it, but an LLM can synthesize richer context:
 
 ```bash
-npm install -g lurk-cli@latest
-
-lurk onboard --install-daemon
+export LURK_LLM_PROVIDER=anthropic
+export LURK_LLM_MODEL=claude-haiku-4-5-20251001
+export ANTHROPIC_API_KEY=sk-...
 ```
 
-The onboard wizard checks dependencies, builds the native daemon, installs the CLI, configures auto-start, prompts for Accessibility permission, and detects installed AI tools (Claude Code, Cursor) to automatically configure MCP integration — all in one step.
+---
 
-**Verify it's working:**
-```bash
-lurk status      # daemon running?
-lurk context     # what does lurk see right now?
-```
+## Your Data Stays Yours
 
-**Alternative install** (without npm):
-```bash
-curl -fsSL https://raw.githubusercontent.com/zasanao/lurk/main/install.sh | bash
-```
+lurk is **100% local**. Everything runs on your machine. Nothing is sent anywhere.
 
-### Connect AI tools
+| | |
+|---|---|
+| **Storage** | SQLite database at `~/.lurk/store.db` — on your disk, nowhere else |
+| **Network** | Zero outbound connections (unless you opt into LLM-enhanced prompts) |
+| **Telemetry** | None. No analytics, no crash reports, no usage tracking |
+| **Accounts** | None. No sign-up, no login, no cloud dashboard |
+| **Servers** | MCP and HTTP run on `localhost` only — not exposed to the network |
+| **Exclusions** | Block sensitive apps and title patterns: `["Messages", "*bank*", "*medical*"]` |
+| **Controls** | `lurk pause` to stop instantly, `lurk delete --all` to wipe everything |
+| **Sanitization** | Emails, auth tokens, and personal identifiers stripped from titles before storage |
 
-The onboard wizard auto-detects and connects your AI tools. If you need to reconnect or add a tool later:
+You own your context. You can inspect it (`lurk log`), export it, delete it, or nuke it. There is no "other copy."
 
-```bash
-lurk connect claude-code   # configure Claude Code MCP integration
-lurk connect cursor        # configure Cursor MCP integration
-lurk connect codex         # configure Codex CLI integration
-```
-
-### Browser extension (ChatGPT, Claude.ai, Gemini, Copilot)
-
-For AI tools that run in the browser, lurk provides a Chrome extension that injects your context into any chat.
-
-1. Start the HTTP API: `lurk serve-http`
-2. Load the extension: Chrome → `chrome://extensions` → Enable Developer Mode → Load Unpacked → select the `extension/` folder
-3. Visit ChatGPT, Claude.ai, Gemini, or Copilot — a small lurk button appears near the chat input
-4. Click it to inject your current context into the message, or use the extension popup to copy/inject
-
-No MCP required. Works with any browser-based AI tool.
-
-### Quick copy (works everywhere)
-
-```bash
-lurk copy                  # copy context to clipboard, paste into any AI chat
-lurk copy --watch          # keep clipboard updated every 30s
-```
-
-**LLM-enhanced context (optional):**
-```bash
-lurk config                # set llm.provider and llm.model
-```
-
-## Commands
-
-```
-lurk onboard        Guided setup — daemon, permissions, AI tool connections
-lurk start          Start the daemon and context engine
-lurk stop           Stop everything
-lurk status         Show daemon status and event counts
-
-lurk context        Show current context snapshot
-lurk context -p     Show natural language context prompt
-lurk agents         Show active AI agents and attention queue
-lurk workflows      List active workflows with context trail
-lurk changes        Show actual code diffs written by agents
-lurk projects       List detected projects with activity stats
-lurk log            Show recent raw events
-lurk search <term>  Search event history
-
-lurk pause          Pause observation (daemon stays running)
-lurk resume         Resume observation
-
-lurk copy            Copy context to clipboard (paste into any AI chat)
-lurk copy --watch    Keep clipboard updated every 30s
-lurk connect <tool>  Connect an AI tool (claude-code, cursor, codex)
-lurk serve-mcp      Start MCP server (stdio, for Claude Code / Cursor)
-lurk serve-http     Start HTTP API at localhost:4141 (needed for extension)
-
-lurk config         Open config in $EDITOR
-lurk purge          Clean up old data per retention policy
-lurk install        Set up auto-start on login
-lurk uninstall      Remove auto-start
-lurk delete         Delete captured events
-lurk debug <title>  Test a window title through the parser pipeline
-```
-
-## MCP Tools
-
-When connected via MCP, AI agents can call these tools:
-
-| Tool | Description |
-|------|-------------|
-| `get_current_context` | What the user is doing right now — app, file, project, activity, intent |
-| `get_session_context` | Full work session — projects, files, research trail, focus blocks |
-| `get_context_prompt` | Natural language preamble — draws from the active workflow's accumulated context |
-| `get_project_context` | Deep context for a specific project |
-| `get_agent_status` | All tracked AI agent sessions and their states |
-| `get_attention_queue` | Priority-sorted list of agents needing human attention |
-| `get_agent_context_for_handoff` | Context briefing for transferring work between agents |
-| `get_workflow_summary` | High-level view of all concurrent work streams |
-| `get_workflows` | List all detected workflows with topics, tools, and context |
-| `get_workflow_context` | Full accumulated context for a specific workflow |
-| `get_active_workflow_prompt` | Synthesized prompt from the active workflow |
-| `add_workflow_context` | **Feed back** decisions, findings, blockers, summaries, or questions |
-| `get_recent_code_changes` | Actual diffs of what agents wrote |
-| `get_code_changes_summary` | Readable summary of recent code changes |
-| `get_agent_session_context` | What happened in the last agent conversation |
-
-### Example: what agents actually receive
-
-When Claude Code calls `get_context_prompt`, it gets a natural language briefing that includes workflow context:
-
-> *"The user is coding in VS Code, editing auth-middleware.ts in the api project (TypeScript). They've been in a focused session for 35 minutes. Key decisions: chose JWT with RS256 over session auth. Claude Code: built JWT auth middleware with token rotation. They recently researched JWT refresh token rotation on Stack Overflow. Related ticket: AUTH-142. Code changes: created auth/middleware.ts; modified server/http.ts."*
-
-When you switch from Claude Code to Cursor, Cursor calls `get_agent_context_for_handoff` and gets:
-
-> *"Claude Code was working on api for 47 minutes. Final state: completed. Files involved: auth-middleware.ts, auth-utils.ts, auth.test.ts, token-refresh.ts. The dashboard component you're building imports from the auth module that was just modified."*
-
-When OpenClaw calls `get_current_context`, it knows the user is deep in a coding session with low interruptibility — so it can hold non-urgent notifications rather than interrupting.
-
-## HTTP API
-
-```bash
-# Current context
-curl localhost:4141/context/now
-
-# Session context
-curl localhost:4141/context/session
-
-# Natural language prompt (includes workflow context)
-curl localhost:4141/context/prompt
-
-# Active workflow prompt
-curl localhost:4141/context/workflow-prompt
-
-# List workflows
-curl localhost:4141/workflows
-
-# Agent status
-curl localhost:4141/agents
-
-# Recent code changes
-curl localhost:4141/changes/summary
-
-# Feed back a decision from an agent
-curl -X POST localhost:4141/context/feedback \
-  -H 'Content-Type: application/json' \
-  -d '{"type": "decision", "content": "Chose JWT over session auth because the API is stateless"}'
-```
-
-### Feedback types
-
-Agents can write structured context back into the active workflow via `POST /context/feedback` or the `add_workflow_context` MCP tool:
-
-| Type | Purpose | Example |
-|------|---------|---------|
-| `decision` | Record an architectural or design choice | "Chose PostgreSQL over SQLite for multi-user support" |
-| `finding` | Record a research finding or discovery | "RS256 is the recommended signing algorithm for production" |
-| `blocker` | Flag something that's blocking progress | "Missing JWKS endpoint configuration" |
-| `summary` | Summarize what was just accomplished | "Built JWT auth middleware with token rotation" |
-| `question` | Record an open question for follow-up | "Should refresh tokens use a separate signing key?" |
+---
 
 ## Configuration
 
-Edit `~/.lurk/config.yaml` or run `lurk config`:
+`~/.lurk/config.yaml`
 
 ```yaml
-# Observation
 observation:
-  poll_interval: 3
-  idle_threshold: 120
-  session_gap: 300
+  poll_interval: 3          # seconds between captures
+  idle_threshold: 120       # seconds before marking idle
+  session_gap: 300          # seconds of inactivity to end a session
 
-# Never capture these
 exclusions:
   apps: ["Messages", "FaceTime"]
   title_patterns: ["*bank*", "*medical*"]
 
-# Context file targets
-context_files:
-  enabled: true
-  targets:
-    - lurk_context      # .lurk-context.md
-    # - claude_md        # CLAUDE.md
-    # - cursorrules      # .cursorrules
-
-# Optional LLM for richer context
-llm:
-  provider: none        # none | ollama | anthropic | openai
-  model: ""
-  api_key: ""
-
-# Data retention
 retention:
-  raw_events_days: 30
+  raw_events_days: 30       # auto-purge old events
   sessions_days: 365
 ```
 
-## Privacy
-
-- All data stays on your machine in `~/.lurk/store.db`
-- No telemetry, no cloud services, no accounts
-- Exclude sensitive apps and title patterns via config
-- `lurk pause` / `lurk resume` for instant control
-- `lurk delete --all` to wipe everything
-- Window title sanitization strips emails, URLs with auth tokens, and personal identifiers before storage
+---
 
 ## Architecture
 
 ```
-daemon/                         # Swift macOS daemon
+daemon/                         Swift macOS daemon
   Sources/LurkDaemon/
-    App/                        # AppDelegate, MenuBarController
-    Observers/                  # Title, input, workspace, calendar observers
-    Store/                      # SQLite database, buffered event writer
-    IPC/                        # Unix socket server
-    Sanitize/                   # Title sanitization
+    App/                        AppDelegate, MenuBarController
+    Observers/                  Title, input, workspace, calendar observers
+    Store/                      SQLite database, buffered event writer
+    IPC/                        Unix socket server
+    Sanitize/                   Title sanitization
 
-lurk/                           # Python context engine
+lurk/                           Python context engine
   src/lurk/
-    cli/                        # Typer CLI (lurk start, stop, context, etc.)
-    config/                     # Settings, installation, retention
-    context/                    # Context model, sessions, projects, agents, workflows
-    enrichment/                 # Parser pipeline, classifiers, agent detection
-    observers/                  # WorkflowObserver protocol, git watcher, session watcher
-    parsers/                    # Per-app title parsers (VS Code, Chrome, Slack, Notion, Figma, Linear, ...)
-    server/                     # MCP server, HTTP API, prompt generation, feedback endpoint
-    store/                      # Database access layer
-    writer/                     # Context file writer (.lurk-context.md, CLAUDE.md)
-    llm/                        # Optional LLM integration for richer context
-    sanitize/                   # Title sanitization rules
+    cli/                        Typer CLI
+    config/                     Settings, installation, retention
+    context/                    Context model, sessions, projects, agents, workflows
+    enrichment/                 Parser pipeline, classifiers, agent detection
+    observers/                  WorkflowObserver protocol, git watcher, session watcher
+    parsers/                    Per-app title parsers (30+ apps)
+    server/                     MCP server, HTTP API, prompt generation, feedback
+    store/                      Database access layer
+    llm/                        Optional LLM integration
+    sanitize/                   Title sanitization rules
+
+extension/                      Chrome extension for browser-based AI tools
 ```
+
+---
 
 ## License
 
