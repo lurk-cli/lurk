@@ -98,10 +98,20 @@ def create_mcp_server():
 
     @mcp.tool()
     def get_context_prompt(max_tokens: int = 250) -> str:
-        """Natural language context preamble describing what the user is currently working on. Inject this into your system prompt for context-aware responses."""
+        """Natural language context preamble describing what the user is currently working on. Inject this into your system prompt for context-aware responses. Draws from the active workflow's accumulated context when available."""
         _refresh()
         model = _get_model()
-        return generate_enhanced_prompt(model, _llm_provider, max_tokens=max_tokens)
+
+        # If there's an active workflow with accumulated context, blend it in
+        wf = model.workflows.get_active_workflow()
+        prompt = generate_enhanced_prompt(model, _llm_provider, max_tokens=max_tokens)
+
+        if wf and (wf.breadcrumbs or wf.agent_contributions or wf.research):
+            wf_prompt = wf.generate_prompt(max_chars=400)
+            if wf_prompt and len(prompt) + len(wf_prompt) < max_tokens * 4:
+                prompt = prompt + " " + wf_prompt
+
+        return prompt[:max_tokens * 4]
 
     @mcp.tool()
     def get_project_context(project_name: str = "") -> dict[str, Any]:
@@ -145,33 +155,13 @@ def create_mcp_server():
 
     @mcp.tool()
     def get_workflow_context(workflow_id: int) -> dict[str, Any]:
-        """Get full context for a specific workflow — topic keywords, tools, projects, files, tickets, captures, and recent knowledge trail."""
+        """Get the full accumulated context for a workflow — what's being worked on, what each agent contributed, research done, code changes, documents involved, and the activity trail."""
         _refresh()
         model = _get_model()
         wf = model.workflows.get_workflow(workflow_id)
         if not wf:
             return {"error": f"Workflow {workflow_id} not found."}
-        result = wf.to_dict()
-        # Include recent captures if available
-        try:
-            conn = get_connection()
-            try:
-                from ..store.database import fetch_captures_for_workflow
-                captures = fetch_captures_for_workflow(conn, workflow_id, limit=10)
-                result["recent_captures"] = [
-                    {
-                        "ts": c.get("ts"),
-                        "page_title": c.get("page_title"),
-                        "hostname": c.get("hostname"),
-                        "summary": c.get("summary") or c.get("page_title"),
-                    }
-                    for c in captures
-                ]
-            finally:
-                conn.close()
-        except Exception:
-            result["recent_captures"] = []
-        return result
+        return wf.context_snapshot()
 
     @mcp.tool()
     def get_recent_code_changes(project: str = "", hours: float = 4) -> list[dict[str, Any]]:
@@ -225,25 +215,32 @@ def create_mcp_server():
 
     @mcp.tool()
     def get_active_workflow_prompt() -> str:
-        """Get a natural language prompt describing the user's currently active workflow — what they're working on, which tools they've used, and what context has been captured. Use this to understand the user's current work thread."""
+        """Get a synthesized context prompt for the active workflow. This is the key tool for understanding what the user is currently working on — it includes what they're doing, what agents have contributed, what they've researched, and what code was changed."""
         _refresh()
         model = _get_model()
         wf = model.workflows.get_active_workflow()
         if not wf:
             return "No active workflow detected."
-        parts = [f"Active workflow: {wf.label or 'Unnamed'} ({wf.duration_label})"]
-        if wf.topic_keywords:
-            parts.append(f"Topics: {', '.join(wf.topic_keywords[:8])}")
-        if wf.tools:
-            parts.append(f"Tools used: {', '.join(wf.tools)}")
-        if wf.projects:
-            parts.append(f"Projects: {', '.join(wf.projects)}")
-        if wf.files:
-            parts.append(f"Files touched: {len(wf.files)}")
-        if wf.tickets:
-            parts.append(f"Tickets: {', '.join(wf.tickets)}")
-        parts.append(f"Activity: {wf.event_count} events, {wf.capture_count} captures")
-        return "\n".join(parts)
+
+        # Try LLM synthesis for a more natural prompt
+        if _llm_provider:
+            try:
+                from ..llm.enhanced_prompt import SYSTEM_PROMPT
+                snapshot = wf.context_snapshot()
+                import json
+                context_str = json.dumps(snapshot, indent=2, default=str)
+                response = _llm_provider.generate(
+                    f"Synthesize this workflow context into a 3-5 sentence briefing "
+                    f"for another AI agent:\n\n{context_str}",
+                    system=SYSTEM_PROMPT,
+                    max_tokens=300,
+                )
+                if response and response.text:
+                    return response.text
+            except Exception:
+                pass
+
+        return wf.generate_prompt()
 
     return mcp
 

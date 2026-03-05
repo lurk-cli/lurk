@@ -297,44 +297,38 @@ class ContextServer:
             conn.close()
 
     def _build_workflow_prompt(self, wf) -> str:
-        """Build a pre-filled prompt from a workflow's knowledge trail."""
-        from ..store.database import fetch_captures_for_workflow, get_connection as get_conn
+        """Build a context prompt from the workflow's accumulated context.
 
-        conn = get_conn()
-        try:
-            captures = fetch_captures_for_workflow(conn, wf.id, limit=15)
-        finally:
-            conn.close()
+        Uses the workflow's own prompt generation (from accumulated breadcrumbs,
+        agent contributions, research, code changes, documents). Falls back to
+        LLM synthesis if available, for a more natural result.
+        """
+        # Try LLM synthesis first
+        if self.llm_provider:
+            try:
+                from ..llm.enhanced_prompt import SYSTEM_PROMPT
+                snapshot = wf.context_snapshot()
+                context_str = json.dumps(snapshot, indent=2, default=str)
+                user_prompt = (
+                    "Synthesize this workflow context into a natural briefing "
+                    "(3-5 sentences) that another AI agent can use to understand "
+                    "what the user is working on, what's been done so far, and "
+                    "what they're currently focused on:\n\n" + context_str
+                )
+                response = self.llm_provider.generate(
+                    user_prompt, system=SYSTEM_PROMPT, max_tokens=300
+                )
+                if response and response.text:
+                    return response.text
+            except Exception:
+                pass
 
-        if not captures:
-            return "No captures in this workflow yet."
+        # Fall back to rules-based prompt from the workflow itself
+        prompt = wf.generate_prompt()
+        if prompt:
+            return prompt
 
-        # Build structured prompt from captures
-        parts = []
-
-        # Workflow topic line
-        if wf.label:
-            parts.append(f"I've been researching: {wf.label}\n")
-        parts.append("Here's what I've gathered:\n")
-
-        seen_urls = set()
-        for cap in captures:
-            url = cap.get("url", "")
-            # Deduplicate by URL
-            if url and url in seen_urls:
-                continue
-            if url:
-                seen_urls.add(url)
-
-            source = _format_capture_source(cap)
-            content = _extract_capture_summary(cap)
-
-            if content:
-                parts.append(f"- [{source}] {content}")
-
-        parts.append("\n")  # Leave space for user's actual question
-
-        return "\n".join(parts)
+        return "No context accumulated for this workflow yet."
 
     def _enrichment_loop(self) -> None:
         """Background loop that enriches events and updates the model."""
@@ -369,7 +363,6 @@ class ContextServer:
                     conn = get_connection()
                     try:
                         for snap in snapshots:
-                            # Assign to workflow based on project + file names
                             from ..context.workflows import _WORD_RE, _STOP_WORDS
                             keywords = [snap.project]
                             if snap.branch and snap.branch not in ("main", "master"):
@@ -387,6 +380,12 @@ class ContextServer:
                                     wf.add_project(snap.project)
                                     for fd in snap.file_diffs:
                                         wf.add_file(fd.path)
+                                    # Feed code changes as structured context
+                                    for fd in snap.file_diffs[:5]:
+                                        if fd.new_file:
+                                            wf.add_code_change(f"created {fd.path}")
+                                        elif fd.additions:
+                                            wf.add_code_change(f"modified {fd.path}")
 
                             data = snap.to_dict()
                             data["workflow_id"] = workflow_id
@@ -414,12 +413,10 @@ class ContextServer:
                     conn = get_connection()
                     try:
                         for session in updated:
-                            # Feed session context into workflows
                             from ..context.workflows import _WORD_RE, _STOP_WORDS
                             keywords = [session.project]
                             if session.branch and session.branch not in ("main", "master"):
                                 keywords.append(session.branch)
-                            # Extract keywords from user messages
                             for msg in session.user_messages[-3:]:
                                 words = _WORD_RE.findall(msg.lower())
                                 keywords.extend(w for w in words if w not in _STOP_WORDS and len(w) > 2)
@@ -432,6 +429,10 @@ class ContextServer:
                                     wf.add_tool("Claude Code")
                                     for fe in session.files_edited[-5:]:
                                         wf.add_file(fe.file_path)
+                                    # Feed agent summary as structured contribution
+                                    summary = session.summary_text()
+                                    if summary:
+                                        wf.add_agent_contribution("Claude Code", summary)
 
                             logger.info(
                                 "Session update: %s (%s) — %d msgs, %d edits, %d tool calls",

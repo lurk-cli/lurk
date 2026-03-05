@@ -4,13 +4,14 @@ Workflows are the core unit of shared context in lurk. They represent
 a coherent thread of work (e.g. "JWT auth investigation", "lurk project",
 "Q1 budget review") that spans multiple tools, apps, and time periods.
 
-Workflows are fed by:
-- Enriched events from the daemon (window titles, app switches)
-- Viewport captures from the extension (page content, typing)
-- Both flow through the same clustering engine
+Every observer feeds into workflows:
+- Window titles → breadcrumbs ("reading email about Project Alpha")
+- Git watcher → code contributions ("added session_watcher.py")
+- Session watcher → agent summaries ("Claude Code built the HTTP server")
+- Extension captures → research/content context
 
-Uses header text, page titles, file names, and extracted keywords to
-automatically cluster activity into workflows. No LLM required.
+The workflow accumulates this into an evolving context that any consuming
+agent can use to understand what's being worked on and why.
 """
 
 from __future__ import annotations
@@ -42,6 +43,11 @@ _STOP_WORDS = frozenset({
 
 _WORD_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9_.-]{2,}")
 
+# Max breadcrumbs/contributions per workflow
+MAX_BREADCRUMBS = 50
+MAX_CONTRIBUTIONS = 20
+MAX_RESEARCH = 20
+
 
 @dataclass
 class Workflow:
@@ -50,6 +56,10 @@ class Workflow:
     A workflow spans tools — it might include Claude Code, a Google Doc,
     a Stack Overflow search, and a ChatGPT conversation, all connected
     by topic overlap.
+
+    The workflow accumulates structured context from all observers so that
+    at any point, a consuming agent can get a synthesized understanding of
+    what's being worked on.
     """
     id: int
     created_ts: float
@@ -57,14 +67,36 @@ class Workflow:
     topic_keywords: list[str]
     label: str | None = None
     capture_count: int = 0
-    event_count: int = 0  # enriched events assigned to this workflow
+    event_count: int = 0
     is_active: bool = True
     status: str = "active"  # active | paused | completed
-    tools: list[str] = field(default_factory=list)  # apps/sites that contributed
-    projects: list[str] = field(default_factory=list)  # code projects involved
-    files: list[str] = field(default_factory=list)  # files touched
-    tickets: list[str] = field(default_factory=list)  # tickets referenced
-    key_decisions: list[str] = field(default_factory=list)  # user-typed intent summaries
+    tools: list[str] = field(default_factory=list)
+    projects: list[str] = field(default_factory=list)
+    files: list[str] = field(default_factory=list)
+    tickets: list[str] = field(default_factory=list)
+    key_decisions: list[str] = field(default_factory=list)
+
+    # --- Accumulated context from observers ---
+
+    # Breadcrumbs: natural language trail of what happened
+    # e.g. "reading email about Project Alpha", "editing Q3 Revenue spreadsheet"
+    breadcrumbs: list[str] = field(default_factory=list)
+
+    # Agent contributions: what each tool/agent produced
+    # e.g. {"Claude Code": "built session watcher and HTTP server endpoints"}
+    agent_contributions: dict[str, str] = field(default_factory=dict)
+
+    # Research trail: topics researched with sources
+    # e.g. [{"topic": "SaaS market size", "source": "google.com"}]
+    research: list[dict[str, str]] = field(default_factory=list)
+
+    # Code changes summary: what was actually built/changed
+    # e.g. ["added observers/session_watcher.py", "modified server/http.py to add endpoints"]
+    code_changes: list[str] = field(default_factory=list)
+
+    # Documents involved: specific doc names and what they contain
+    # e.g. {"Q3 Revenue Forecast": "spreadsheet with revenue projections"}
+    documents: dict[str, str] = field(default_factory=dict)
 
     @property
     def duration_seconds(self) -> float:
@@ -88,8 +120,43 @@ class Workflow:
         intersection = my_set & their_set
         if not intersection:
             return 0.0
-        # Jaccard-ish but weighted toward the smaller set
         return len(intersection) / min(len(my_set), len(their_set))
+
+    # --- Context accumulation methods ---
+
+    def add_breadcrumb(self, description: str) -> None:
+        """Record what the user was doing — dedupes consecutive identical entries."""
+        if self.breadcrumbs and self.breadcrumbs[-1] == description:
+            return
+        self.breadcrumbs.append(description)
+        if len(self.breadcrumbs) > MAX_BREADCRUMBS:
+            self.breadcrumbs = self.breadcrumbs[-MAX_BREADCRUMBS:]
+
+    def add_agent_contribution(self, tool: str, summary: str) -> None:
+        """Record what an agent contributed to this workflow."""
+        self.agent_contributions[tool] = summary  # latest overwrites
+        self.add_tool(tool)
+
+    def add_research(self, topic: str, source: str = "") -> None:
+        """Record a research action."""
+        # Dedupe by topic
+        for r in self.research:
+            if r.get("topic") == topic:
+                return
+        self.research.append({"topic": topic, "source": source})
+        if len(self.research) > MAX_RESEARCH:
+            self.research = self.research[-MAX_RESEARCH:]
+
+    def add_code_change(self, description: str) -> None:
+        """Record a code change."""
+        if description not in self.code_changes:
+            self.code_changes.append(description)
+            if len(self.code_changes) > MAX_CONTRIBUTIONS:
+                self.code_changes = self.code_changes[-MAX_CONTRIBUTIONS:]
+
+    def add_document(self, name: str, description: str = "") -> None:
+        """Record a document involved in this workflow."""
+        self.documents[name] = description or self.documents.get(name, "")
 
     def add_tool(self, tool: str) -> None:
         if tool and tool not in self.tools:
@@ -111,6 +178,83 @@ class Workflow:
         if ticket and ticket not in self.tickets:
             self.tickets.append(ticket)
 
+    # --- Context output ---
+
+    def context_snapshot(self) -> dict[str, Any]:
+        """Get the full accumulated context for this workflow.
+
+        This is what gets fed to the LLM or rules-based prompt generator
+        to produce a synthesized prompt for consuming agents.
+        """
+        return {
+            "id": self.id,
+            "label": self.label,
+            "status": self.status,
+            "duration": self.duration_label,
+            "keywords": self.topic_keywords[:10],
+            "tools": self.tools,
+            "projects": self.projects,
+            "tickets": self.tickets,
+            "breadcrumbs": self.breadcrumbs[-10:],
+            "agent_contributions": self.agent_contributions,
+            "research": self.research[-5:],
+            "code_changes": self.code_changes[-5:],
+            "documents": dict(list(self.documents.items())[-5:]),
+            "files_count": len(self.files),
+        }
+
+    def generate_prompt(self, max_chars: int = 1200) -> str:
+        """Generate a natural language context prompt for this workflow.
+
+        This is the rules-based version. The LLM-enhanced version uses
+        context_snapshot() as input and synthesizes a better prompt.
+        """
+        parts: list[str] = []
+
+        # Lead with what's being worked on
+        if self.label:
+            parts.append(f"The user is working on: {self.label}.")
+        if self.projects:
+            parts.append(f"Project: {', '.join(self.projects[:3])}.")
+
+        # What agents have contributed
+        for tool, summary in self.agent_contributions.items():
+            parts.append(f"{tool}: {summary}")
+
+        # Activity trail — connect the dots
+        if self.breadcrumbs:
+            recent = self.breadcrumbs[-6:]
+            trail = list(dict.fromkeys(recent))  # dedupe preserving order
+            parts.append("Recent activity: " + " → ".join(trail) + ".")
+
+        # Research
+        if self.research:
+            topics = [r["topic"] for r in self.research[-3:]]
+            parts.append(f"Researched: {', '.join(topics)}.")
+
+        # Code changes
+        if self.code_changes:
+            parts.append("Code changes: " + "; ".join(self.code_changes[-3:]) + ".")
+
+        # Documents
+        if self.documents:
+            for name, desc in list(self.documents.items())[-3:]:
+                if desc:
+                    parts.append(f"Document \"{name}\": {desc}.")
+                else:
+                    parts.append(f"Working with \"{name}\".")
+
+        # Tickets
+        if self.tickets:
+            parts.append(f"Related tickets: {', '.join(self.tickets[-3:])}.")
+
+        # Duration
+        if self.duration_seconds > 300:
+            parts.append(f"Active for {self.duration_label}.")
+
+        result = " ".join(parts)
+        return result[:max_chars]
+
     def to_dict(self) -> dict:
         return {
             "id": self.id,
@@ -127,14 +271,19 @@ class Workflow:
             "capture_count": self.capture_count,
             "event_count": self.event_count,
             "is_active": self.is_active,
+            "breadcrumbs": self.breadcrumbs[-5:],
+            "agent_contributions": self.agent_contributions,
+            "research": self.research[-3:],
+            "code_changes": self.code_changes[-3:],
+            "documents": dict(list(self.documents.items())[-3:]),
         }
 
 
 class WorkflowClusterer:
     """Clusters captures into workflows based on topic overlap."""
 
-    MERGE_THRESHOLD = 0.3  # minimum keyword overlap to join a workflow
-    STALE_MINUTES = 60  # workflows with no captures for this long become inactive
+    MERGE_THRESHOLD = 0.3
+    STALE_MINUTES = 60
 
     def __init__(self) -> None:
         self._workflows: list[Workflow] = []
@@ -162,18 +311,17 @@ class WorkflowClusterer:
                 if wf.id >= self._next_id:
                     self._next_id = wf.id + 1
         except Exception:
-            pass  # Table may not exist yet
+            pass
 
     def process_enriched_event(self, event: dict, conn=None) -> int | None:
-        """Process an enriched event from the daemon and assign to a workflow.
+        """Process an enriched event and assign to a workflow.
 
-        This is how the core observer feeds workflows — every enriched event
-        (window title change, app switch, etc.) gets routed here.
+        Also extracts structured context from the event and adds it
+        to the workflow — breadcrumbs, documents, research, etc.
         """
-        # Build keywords from event fields
         keywords = []
-        for field in ("title", "file", "project", "topic", "document_name", "ticket"):
-            val = event.get(field)
+        for fld in ("title", "file", "project", "topic", "document_name", "ticket"):
+            val = event.get(fld)
             if val and isinstance(val, str):
                 words = _WORD_RE.findall(val.lower())
                 keywords.extend(w for w in words if w not in _STOP_WORDS and len(w) > 2)
@@ -181,28 +329,57 @@ class WorkflowClusterer:
         if not keywords:
             return None
 
-        # Deduplicate
         keywords = list(dict.fromkeys(keywords))[:15]
 
-        # Find or create workflow
         workflow_id = self._match_or_create(keywords, conn)
         wf = self.get_workflow(workflow_id)
-        if wf:
-            wf.event_count += 1
-            app = event.get("app", "")
-            if app:
-                wf.add_tool(app)
-            project = event.get("project")
-            if project:
-                wf.add_project(project)
-            file = event.get("file")
-            if file:
-                wf.add_file(file)
-            ticket = event.get("ticket")
-            if ticket:
-                wf.add_ticket(ticket)
-            self._save_workflow(wf, conn)
+        if not wf:
+            return workflow_id
 
+        wf.event_count += 1
+
+        # --- Feed structured context into the workflow ---
+
+        app = event.get("app", "")
+        if app:
+            wf.add_tool(app)
+
+        project = event.get("project")
+        if project:
+            wf.add_project(project)
+
+        file = event.get("file")
+        if file:
+            wf.add_file(file)
+
+        ticket = event.get("ticket")
+        if ticket:
+            wf.add_ticket(ticket)
+
+        # Add breadcrumb — natural language description of this event
+        breadcrumb = _describe_event(event)
+        if breadcrumb:
+            wf.add_breadcrumb(breadcrumb)
+
+        # Track documents
+        doc_name = event.get("document_name")
+        if doc_name:
+            sub = event.get("sub_activity", "")
+            if sub == "spreadsheet":
+                wf.add_document(doc_name, "spreadsheet")
+            elif sub == "presentation":
+                wf.add_document(doc_name, "presentation")
+            else:
+                wf.add_document(doc_name)
+
+        # Track research
+        activity = event.get("activity", "")
+        topic = event.get("topic")
+        if activity == "researching" and topic:
+            domain = event.get("url_domain", "")
+            wf.add_research(topic, domain)
+
+        self._save_workflow(wf, conn)
         return workflow_id
 
     def assign_workflow(self, capture_data: dict, conn=None) -> int:
@@ -216,7 +393,6 @@ class WorkflowClusterer:
         wf = self.get_workflow(workflow_id)
         if wf:
             wf.capture_count += 1
-            # Track tool from capture
             hostname = capture_data.get("hostname", "")
             app = capture_data.get("app", "")
             if hostname:
@@ -245,7 +421,6 @@ class WorkflowClusterer:
 
         if best_wf and best_score >= self.MERGE_THRESHOLD:
             best_wf.updated_ts = now
-            # Expand keywords
             existing = set(w.lower() for w in best_wf.topic_keywords)
             for kw in keywords:
                 if kw.lower() not in existing:
@@ -258,7 +433,6 @@ class WorkflowClusterer:
             return self._create_workflow(keywords, conn)
 
     def complete_workflow(self, workflow_id: int, conn=None) -> bool:
-        """Mark a workflow as completed."""
         wf = self.get_workflow(workflow_id)
         if not wf:
             return False
@@ -268,7 +442,6 @@ class WorkflowClusterer:
         return True
 
     def reopen_workflow(self, workflow_id: int, conn=None) -> bool:
-        """Reopen a completed workflow."""
         wf = self.get_workflow(workflow_id)
         if not wf:
             return False
@@ -279,13 +452,11 @@ class WorkflowClusterer:
         return True
 
     def list_workflows(self, include_completed: bool = False) -> list[Workflow]:
-        """List workflows, most recent first."""
         now = time.time()
         results = []
         for wf in self._workflows:
             if not include_completed and wf.status == "completed":
                 continue
-            # Auto-deactivate stale workflows (but don't complete them)
             if wf.is_active and now - wf.updated_ts > self.STALE_MINUTES * 60:
                 wf.is_active = False
             results.append(wf)
@@ -293,7 +464,6 @@ class WorkflowClusterer:
         return results
 
     def get_active_workflow(self) -> Workflow | None:
-        """Get the most recently updated active workflow."""
         now = time.time()
         active = [
             wf for wf in self._workflows
@@ -322,7 +492,6 @@ class WorkflowClusterer:
         )
         self._next_id += 1
         self._workflows.append(wf)
-        # Keep bounded
         if len(self._workflows) > 50:
             self._workflows = sorted(
                 self._workflows, key=lambda w: w.updated_ts, reverse=True
@@ -349,17 +518,55 @@ class WorkflowClusterer:
             pass
 
 
+def _describe_event(event: dict) -> str:
+    """Turn an enriched event into a natural breadcrumb for the workflow."""
+    app = event.get("app", "")
+    activity = event.get("activity", "")
+    sub = event.get("sub_activity", "")
+    doc = event.get("document_name")
+    topic = event.get("topic")
+    file = event.get("file")
+    project = event.get("project")
+
+    if doc:
+        if sub == "spreadsheet":
+            return f"working on spreadsheet \"{doc}\""
+        if sub == "presentation":
+            return f"working on presentation \"{doc}\""
+        return f"working on \"{doc}\""
+
+    if sub == "email_reading" and topic:
+        return f"reading email about \"{topic}\""
+    if sub == "email_composing":
+        return "composing an email"
+
+    if activity == "researching" and topic:
+        return f"researching \"{topic}\""
+
+    if activity == "coding" and file and project:
+        return f"editing {file} in {project}"
+
+    if sub == "code_review" and topic:
+        return f"reviewing \"{topic}\""
+
+    if activity == "communicating" and topic:
+        return f"conversation about \"{topic}\""
+
+    if activity == "browsing" and topic:
+        return f"looking at \"{topic}\""
+
+    return ""
+
+
 def extract_keywords(capture_data: dict) -> list[str]:
     """Extract topic keywords from a capture for workflow clustering."""
     text_sources = []
 
-    # Page title — high signal
     title = capture_data.get("page_title", "")
     if title:
         text_sources.append(title)
-        text_sources.append(title)  # double-weight titles
+        text_sources.append(title)
 
-    # Headers — high signal
     headers = capture_data.get("headers")
     if isinstance(headers, list):
         for h in headers:
@@ -369,42 +576,34 @@ def extract_keywords(capture_data: dict) -> list[str]:
     elif isinstance(headers, str):
         text_sources.append(headers)
 
-    # URL path segments
     url = capture_data.get("url", "")
     if url:
-        # Extract meaningful path segments
         path = url.split("//", 1)[-1].split("/")[1:]
         for seg in path:
             seg = seg.split("?")[0].split("#")[0]
             if seg and len(seg) > 2 and not seg.isdigit():
                 text_sources.append(seg.replace("-", " ").replace("_", " "))
 
-    # Typing text — very high signal for intent
     typing = capture_data.get("typing_text") or capture_data.get("text_preview", "")
     if typing:
         text_sources.append(typing)
-        text_sources.append(typing)  # double-weight
+        text_sources.append(typing)
 
-    # Meta description
     meta = capture_data.get("meta", {})
     if isinstance(meta, dict):
         desc = meta.get("description", "")
         if desc:
             text_sources.append(desc)
 
-    # Count words across all sources
     combined = " ".join(text_sources).lower()
     words = _WORD_RE.findall(combined)
     filtered = [w for w in words if w.lower() not in _STOP_WORDS and len(w) > 2]
 
-    # Return top keywords by frequency
     counts = Counter(filtered)
     return [word for word, _ in counts.most_common(15)]
 
 
 def _generate_label(keywords: list[str]) -> str | None:
-    """Generate a human-readable label from keywords."""
     if not keywords:
         return None
-    # Take top 3 keywords as label
     return " / ".join(keywords[:3])
