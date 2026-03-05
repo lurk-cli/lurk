@@ -189,6 +189,11 @@ def _build_context_data(model: ContextModel) -> str:
         if wf_parts:
             sections.append("WORKFLOW CONTEXT:\n" + "\n".join(wf_parts))
 
+    # --- Screen content (OCR from latest screenshot) ---
+    screen_ctx = _get_screen_context()
+    if screen_ctx:
+        sections.append(f"SCREEN CONTENT:\n{screen_ctx}")
+
     # --- Cross-session continuity ---
     if model.recent_sessions:
         last = model.recent_sessions[-1]
@@ -201,6 +206,35 @@ def _build_context_data(model: ContextModel) -> str:
                 )
 
     return "\n\n".join(sections)
+
+
+def _get_screen_context() -> str | None:
+    """Get context from the latest screenshot OCR analysis."""
+    try:
+        from ..observers.screenshot_observer import ScreenshotObserver
+        observer = ScreenshotObserver()
+        ctx = observer.get_latest_context()
+        if not ctx:
+            return None
+        parts = []
+        if ctx.get("summary"):
+            parts.append(ctx["summary"])
+        if ctx.get("activity"):
+            parts.append(f"Activity: {ctx['activity']}")
+        if ctx.get("agent_tool"):
+            parts.append(f"Agent: {ctx['agent_tool']}")
+        if ctx.get("files"):
+            parts.append(f"Files visible: {', '.join(ctx['files'][:5])}")
+        if ctx.get("terminal_commands"):
+            parts.append(f"Recent commands: {'; '.join(ctx['terminal_commands'][-3:])}")
+        if ctx.get("errors"):
+            parts.append(f"Errors: {'; '.join(ctx['errors'][:2])}")
+        if ctx.get("text_preview") and not parts:
+            # Fall back to raw text if no structured signals
+            parts.append(ctx["text_preview"][:200])
+        return "\n".join(parts) if parts else None
+    except Exception:
+        return None
 
 
 def _get_agent_context() -> str | None:

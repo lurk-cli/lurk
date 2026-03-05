@@ -18,7 +18,7 @@ from rich.table import Table
 app = typer.Typer(
     name="lurk",
     help="lurk — Context broker for AI tools",
-    no_args_is_help=True,
+    no_args_is_help=False,
 )
 console = Console()
 
@@ -27,61 +27,218 @@ PID_FILE = LURK_DIR / "daemon.pid"
 ENGINE_PID_FILE = LURK_DIR / "engine.pid"
 
 
-@app.command()
-def start():
-    """Start the lurk daemon and intelligence engine."""
+@app.callback(invoke_without_command=True)
+def main(ctx: typer.Context):
+    """lurk — Context broker for AI tools.
+
+    Run `lurk` with no arguments to start everything automatically.
+    """
+    if ctx.invoked_subcommand is None:
+        _smart_start()
+
+
+def _smart_start():
+    """One-command setup: build if needed, start everything, connect tools, done."""
+    import shutil
+
     LURK_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Check if daemon is already running
-    if PID_FILE.exists():
-        pid = int(PID_FILE.read_text().strip())
-        try:
-            os.kill(pid, 0)
-            console.print(f"[yellow]lurk daemon already running (PID {pid})[/yellow]")
-            return
-        except ProcessLookupError:
-            PID_FILE.unlink()
+    # Check if already running
+    daemon_running = _is_pid_alive(PID_FILE)
+    engine_running = _is_pid_alive(ENGINE_PID_FILE)
 
-    # Find the daemon binary
-    daemon_path = _find_daemon()
-    if not daemon_path:
-        console.print("[red]lurk-daemon binary not found. Build it with:[/red]")
-        console.print("  cd daemon && swift build")
-        raise typer.Exit(1)
+    if daemon_running and engine_running:
+        console.print("[green]lurk is already running.[/green]")
+        _show_quick_status()
+        return
 
     console.print("[bold]Starting lurk...[/bold]")
 
-    # Start Swift daemon
-    proc = subprocess.Popen(
-        [daemon_path],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-    PID_FILE.write_text(str(proc.pid))
-    console.print(f"  [green]✓[/green] Daemon started (PID {proc.pid})")
+    # Step 1: Find or build daemon (silent, no prompts)
+    daemon_path = _find_daemon()
+    if not daemon_path:
+        if shutil.which("swift"):
+            console.print("  Building daemon...")
+            daemon_path = _build_daemon_silent()
+
+    if not daemon_path:
+        console.print()
+        console.print("[red]Could not find or build lurk-daemon.[/red]")
+        if not shutil.which("swift"):
+            console.print("  Swift is needed to build the native daemon.")
+            console.print("  Install it with: [cyan]xcode-select --install[/cyan]")
+            console.print("  Then run [cyan]lurk[/cyan] again.")
+        raise typer.Exit(1)
+
+    # Step 2: Start daemon
+    if not daemon_running:
+        _start_daemon(daemon_path)
+
+    # Step 3: Start engine (HTTP server in background)
+    if not engine_running:
+        _start_engine()
+
+    # Step 4: Auto-connect any detected AI tools (silent, no prompts)
+    _auto_connect_tools()
+
+    # Step 5: Check accessibility (just open settings if needed, don't block)
+    _check_accessibility_silent()
 
     console.print()
     console.print("[bold green]lurk is running.[/bold green]")
-    console.print()
-    console.print("Quick start:")
-    console.print("  Connect tools: [cyan]lurk connect[/cyan]")
-    console.print("  View context:  [cyan]lurk context[/cyan]")
-    console.print("  HTTP API:      [cyan]curl localhost:4141/context/now[/cyan]")
+    console.print("  Context API at [cyan]http://localhost:4141[/cyan]")
+    console.print("  Stop with [cyan]lurk stop[/cyan]")
+
+
+def _is_pid_alive(pid_file: Path) -> bool:
+    """Check if a PID file points to a running process."""
+    if not pid_file.exists():
+        return False
+    try:
+        pid = int(pid_file.read_text().strip())
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, ValueError, OSError):
+        pid_file.unlink(missing_ok=True)
+        return False
+
+
+def _start_daemon(daemon_path: str) -> None:
+    """Start the Swift daemon in the background."""
+    log_path = LURK_DIR / "daemon.log"
+    log_fd = open(log_path, "a")
+    proc = subprocess.Popen(
+        [daemon_path],
+        stdout=log_fd,
+        stderr=log_fd,
+    )
+    PID_FILE.write_text(str(proc.pid))
+    console.print(f"  [green]✓[/green] Daemon started")
+
+
+def _start_engine() -> None:
+    """Start the Python intelligence engine (HTTP server) in the background."""
+    import shutil as _shutil
+
+    lurk_bin = _shutil.which("lurk")
+    if lurk_bin:
+        cmd = [lurk_bin, "serve-http"]
+    else:
+        cmd = [sys.executable, "-m", "lurk.cli.main", "serve-http"]
+
+    log_path = LURK_DIR / "engine.log"
+    log_fd = open(log_path, "a")
+    proc = subprocess.Popen(
+        cmd,
+        stdout=log_fd,
+        stderr=log_fd,
+    )
+    ENGINE_PID_FILE.write_text(str(proc.pid))
+    console.print(f"  [green]✓[/green] Engine started")
+
+
+def _auto_connect_tools() -> None:
+    """Silently connect all detected AI tools — no prompts."""
+    try:
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+        from lurk.config.connect import detect_installed_tools, connect_tool, is_connected, SUPPORTED_TOOLS
+
+        detected = detect_installed_tools()
+        for tool in detected:
+            if not is_connected(tool):
+                ok, msg = connect_tool(tool)
+                if ok:
+                    name = SUPPORTED_TOOLS.get(tool, tool)
+                    console.print(f"  [green]✓[/green] Connected to {name}")
+    except Exception:
+        pass  # Don't fail startup over tool connection
+
+
+def _check_accessibility_silent() -> None:
+    """Check accessibility and silently open settings if needed."""
+    try:
+        from lurk.config.install import check_accessibility
+        if not check_accessibility():
+            subprocess.Popen(
+                ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            console.print("  [yellow]![/yellow] Accessibility permission needed — System Settings opened")
+    except Exception:
+        pass
+
+
+def _build_daemon_silent() -> str | None:
+    """Build the daemon without any prompts. Returns path or None."""
+    candidates = [
+        Path(__file__).parent.parent.parent.parent.parent / "daemon",
+        Path.home() / ".lurk" / "src" / "daemon",
+    ]
+    daemon_src = None
+    for c in candidates:
+        if (c / "Package.swift").exists():
+            daemon_src = c
+            break
+
+    if daemon_src is None:
+        return None
+
+    result = subprocess.run(
+        ["swift", "build", "-c", "release"],
+        cwd=str(daemon_src),
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+
+    built = daemon_src / ".build" / "release" / "lurk-daemon"
+    if not built.exists():
+        return None
+
+    # Copy to ~/.local/bin for easy discovery
+    dest = Path.home() / ".local" / "bin"
+    dest.mkdir(parents=True, exist_ok=True)
+    dest_path = dest / "lurk-daemon"
+    import shutil
+    shutil.copy2(str(built), str(dest_path))
+    dest_path.chmod(0o755)
+    console.print(f"  [green]✓[/green] Daemon built")
+    return str(dest_path)
+
+
+def _show_quick_status() -> None:
+    """Show a one-line status summary."""
+    try:
+        import urllib.request
+        resp = urllib.request.urlopen("http://127.0.0.1:4141/context/now", timeout=2)
+        data = json.loads(resp.read())
+        app_name = data.get("app", "")
+        activity = data.get("activity", "")
+        if app_name:
+            console.print(f"  Currently: [cyan]{app_name}[/cyan] ({activity})")
+    except Exception:
+        pass
+
+
+@app.command()
+def start():
+    """Start the lurk daemon and intelligence engine."""
+    _smart_start()
 
 
 @app.command()
 def stop():
-    """Stop the lurk daemon and engine."""
+    """Stop lurk completely."""
     stopped = False
 
     for pidfile, name in [(PID_FILE, "daemon"), (ENGINE_PID_FILE, "engine")]:
         if pidfile.exists():
-            pid = int(pidfile.read_text().strip())
             try:
+                pid = int(pidfile.read_text().strip())
                 os.kill(pid, signal.SIGTERM)
-                console.print(f"  [green]✓[/green] Stopped {name} (PID {pid})")
+                console.print(f"  [green]✓[/green] Stopped {name}")
                 stopped = True
-            except ProcessLookupError:
+            except (ProcessLookupError, ValueError, OSError):
                 pass
             pidfile.unlink(missing_ok=True)
 
@@ -94,26 +251,29 @@ def stop():
 @app.command()
 def status():
     """Show current lurk status."""
-    running = False
-    if PID_FILE.exists():
-        pid = int(PID_FILE.read_text().strip())
-        try:
-            os.kill(pid, 0)
-            console.print(f"[green]◉ Daemon running[/green] (PID {pid})")
-            running = True
-        except ProcessLookupError:
-            console.print("[yellow]○ Daemon not running[/yellow] (stale PID file)")
-            PID_FILE.unlink()
+    daemon_alive = _is_pid_alive(PID_FILE)
+    engine_alive = _is_pid_alive(ENGINE_PID_FILE)
+
+    if daemon_alive:
+        console.print(f"[green]◉ Daemon running[/green]")
     else:
         console.print("[yellow]○ Daemon not running[/yellow]")
+
+    if engine_alive:
+        console.print(f"[green]◉ Engine running[/green] (http://localhost:4141)")
+    else:
+        console.print("[yellow]○ Engine not running[/yellow]")
+
+    if not daemon_alive and not engine_alive:
+        console.print("  Run [cyan]lurk[/cyan] to start.")
+        return
 
     # Check DB
     db_path = LURK_DIR / "store.db"
     if db_path.exists():
         size_mb = db_path.stat().st_size / (1024 * 1024)
-        console.print(f"  Database: {db_path} ({size_mb:.1f} MB)")
+        console.print(f"  Database: {size_mb:.1f} MB")
 
-        # Count events
         import sqlite3
         conn = sqlite3.connect(str(db_path))
         try:
@@ -121,11 +281,21 @@ def status():
             unenriched = conn.execute(
                 "SELECT COUNT(*) FROM events WHERE enriched = 0"
             ).fetchone()[0]
-            console.print(f"  Events: {total} total, {unenriched} pending enrichment")
+            console.print(f"  Events: {total} total, {unenriched} pending")
         except Exception:
             pass
         finally:
             conn.close()
+
+    # Show connected tools
+    try:
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+        from lurk.config.connect import detect_installed_tools, is_connected, SUPPORTED_TOOLS
+        connected = [SUPPORTED_TOOLS[t] for t in detect_installed_tools() if is_connected(t)]
+        if connected:
+            console.print(f"  Connected: {', '.join(connected)}")
+    except Exception:
+        pass
 
 
 @app.command()
@@ -824,37 +994,28 @@ def install(
 ):
     """Install lurk for auto-start on login."""
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
     from lurk.config.install import full_install, find_daemon_binary
 
-    # Find daemon binary
     if daemon_path is None:
         daemon_path = find_daemon_binary()
         if daemon_path is None:
-            daemon_path = _offer_build_daemon()
+            daemon_path = _build_daemon_silent()
             if daemon_path is None:
+                console.print("[red]Could not find or build lurk-daemon.[/red]")
                 raise typer.Exit(1)
 
     console.print("[bold]Installing lurk...[/bold]")
-    console.print()
-
     results = full_install(daemon_path)
 
     for step, ok in results.items():
         icon = "[green]✓[/green]" if ok else "[red]✗[/red]"
         console.print(f"  {icon} {step.replace('_', ' ').title()}")
 
-    if not results.get("accessibility"):
-        console.print()
-        console.print("[yellow]Accessibility permission needed:[/yellow]")
-        console.print("  System Settings → Privacy & Security → Accessibility")
-        console.print("  Add and enable lurk-daemon")
+    _check_accessibility_silent()
+    _auto_connect_tools()
 
-    if results.get("launchd"):
-        console.print()
-        console.print("[bold green]lurk installed![/bold green]")
-        console.print("  It will start automatically on login.")
-        console.print("  Run [cyan]lurk start[/cyan] to start it now.")
+    console.print()
+    console.print("[bold green]lurk installed.[/bold green] Run [cyan]lurk[/cyan] to start.")
 
 
 @app.command()
@@ -944,67 +1105,8 @@ def purge(
 
 
 def _build_daemon() -> str | None:
-    """Build the Swift daemon and copy to ~/.local/bin. Returns path or None."""
-    # Look for daemon source — check relative to Python package, then ~/.lurk/src
-    candidates = [
-        Path(__file__).parent.parent.parent.parent.parent / "daemon",
-        Path.home() / ".lurk" / "src" / "daemon",
-    ]
-    daemon_src = None
-    for c in candidates:
-        if (c / "Package.swift").exists():
-            daemon_src = c
-            break
-
-    if daemon_src is None:
-        console.print("[red]Cannot find daemon source (daemon/Package.swift).[/red]")
-        return None
-
-    console.print(f"  Building from {daemon_src}...")
-    result = subprocess.run(
-        ["swift", "build", "-c", "release"],
-        cwd=str(daemon_src),
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        console.print(f"[red]Build failed:[/red]\n{result.stderr}")
-        return None
-
-    built = daemon_src / ".build" / "release" / "lurk-daemon"
-    if not built.exists():
-        console.print("[red]Build succeeded but binary not found.[/red]")
-        return None
-
-    dest = Path.home() / ".local" / "bin"
-    dest.mkdir(parents=True, exist_ok=True)
-    dest_path = dest / "lurk-daemon"
-    import shutil
-    shutil.copy2(str(built), str(dest_path))
-    dest_path.chmod(0o755)
-    console.print(f"  [green]✓[/green] Installed to {dest_path}")
-    return str(dest_path)
-
-
-def _offer_build_daemon() -> str | None:
-    """When daemon not found, offer to build it. Returns path or None."""
-    import shutil as _shutil
-    console.print("[yellow]lurk-daemon not found.[/yellow]")
-
-    if not _shutil.which("swift"):
-        console.print("  Swift is required to build the daemon.")
-        console.print("  Install Xcode Command Line Tools:")
-        console.print("    [cyan]xcode-select --install[/cyan]")
-        console.print()
-        console.print("  Then run: [cyan]lurk install[/cyan]")
-        return None
-
-    if not typer.confirm("  Build the daemon now?", default=True):
-        console.print("  Build manually:")
-        console.print("    [cyan]cd daemon && swift build -c release[/cyan]")
-        return None
-
-    return _build_daemon()
+    """Build the Swift daemon (with console output). Returns path or None."""
+    return _build_daemon_silent()
 
 
 @app.command()
@@ -1104,95 +1206,16 @@ def connect(
     console.print(f"  {icon} {msg}")
 
 
-@app.command()
-def onboard(
-    install_daemon: bool = typer.Option(False, "--install-daemon", help="Build and install the native daemon"),
-):
-    """Interactive guided setup — build daemon, configure permissions, connect AI tools, start lurk."""
-    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
-    from lurk.config.install import find_daemon_binary, full_install, check_accessibility
-    from lurk.config.connect import detect_installed_tools, connect_tool, is_connected, SUPPORTED_TOOLS
-
-    console.print("[bold]lurk onboard[/bold]")
-    console.print()
-
-    # Step 1: Find or build daemon
-    daemon_path = find_daemon_binary()
-    if daemon_path:
-        console.print(f"  [green]✓[/green] Daemon found at {daemon_path}")
-    else:
-        if not install_daemon:
-            import shutil as _shutil
-            if not _shutil.which("swift"):
-                console.print("[red]Swift not found. Install Xcode Command Line Tools:[/red]")
-                console.print("  [cyan]xcode-select --install[/cyan]")
-                raise typer.Exit(1)
-
-            console.print("  Daemon binary not found.")
-            if not typer.confirm("  Build it now?", default=True):
-                raise typer.Exit(0)
-
-        daemon_path = _build_daemon()
-        if daemon_path is None:
-            raise typer.Exit(1)
-
-    # Step 2: Install launchd plist
-    console.print()
-    console.print("  Configuring auto-start...")
-    results = full_install(daemon_path)
-    for step_name, ok in results.items():
-        icon = "[green]✓[/green]" if ok else "[red]✗[/red]"
-        console.print(f"  {icon} {step_name.replace('_', ' ').title()}")
-
-    # Step 3: Check accessibility
-    console.print()
-    if not check_accessibility():
-        console.print("[yellow]Accessibility permission needed.[/yellow]")
-        console.print("  Opening System Settings...")
-        subprocess.run(
-            ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"],
-            capture_output=True,
-        )
-        console.print("  Add [cyan]lurk-daemon[/cyan] and toggle it on.")
-        console.print("  Then verify with: [cyan]lurk status[/cyan]")
-
-    # Step 4: Detect and connect AI tools
-    console.print()
-    console.print("[bold]Detecting AI tools...[/bold]")
-    detected = detect_installed_tools()
-
-    if detected:
-        for tool in detected:
-            name = SUPPORTED_TOOLS[tool]
-            if is_connected(tool):
-                console.print(f"  [green]✓[/green] {name} already connected")
-            else:
-                if typer.confirm(f"  Connect lurk to {name}?", default=True):
-                    ok, msg = connect_tool(tool)
-                    icon = "[green]✓[/green]" if ok else "[red]✗[/red]"
-                    console.print(f"  {icon} {msg}")
-                else:
-                    console.print(f"  [dim]—[/dim] Skipped {name} (run [cyan]lurk connect {tool}[/cyan] later)")
-    else:
-        console.print("  [dim]No AI tools detected. Connect later with [cyan]lurk connect[/cyan][/dim]")
-
-    # Step 5: Start
-    console.print()
-    start()
-
-    console.print()
-    console.print("[bold green]lurk is ready.[/bold green]")
-    console.print("  [cyan]lurk context[/cyan]      see what lurk observes")
-    console.print("  [cyan]lurk agents[/cyan]       see active AI agents")
-    console.print("  [cyan]lurk connect[/cyan]      connect more tools later")
+@app.command(hidden=True)
+def onboard():
+    """Alias for start — kept for backwards compatibility."""
+    _smart_start()
 
 
-# Keep `setup` as an alias for `onboard` for backwards compatibility
 @app.command(hidden=True)
 def setup():
-    """Alias for onboard."""
-    onboard(install_daemon=False)
+    """Alias for start — kept for backwards compatibility."""
+    _smart_start()
 
 
 def _find_daemon() -> str | None:

@@ -40,6 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         manager.register(InputObserver(manager: manager))
         manager.register(MonitorObserver(manager: manager))
         manager.register(CalendarObserver(manager: manager))
+        manager.register(ScreenCaptureObserver(manager: manager))
         manager.register(PerformanceMonitor(manager: manager))
 
         // Check accessibility permission

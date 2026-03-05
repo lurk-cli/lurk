@@ -41,5 +41,8 @@
   },
   "os": [
     "darwin"
-  ]
+  ],
+  "dependencies": {
+    "lurk-cli": "^0.2.0"
+  }
 }

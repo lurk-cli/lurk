@@ -6,6 +6,7 @@ enum EventType: String {
     case inputState = "input_state"
     case monitorState = "monitor_state"
     case calendarContext = "calendar_context"
+    case screenshot = "screenshot"
 }
 
 enum InputState: String {

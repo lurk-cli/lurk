@@ -183,6 +183,9 @@ class ContextServer:
         # Session watcher — reads agent conversation logs
         from ..observers.session_watcher import SessionWatcher
         self.session_watcher = SessionWatcher()
+        # Screenshot observer — OCR-based screen content analysis
+        from ..observers.screenshot_observer import ScreenshotObserver
+        self.screenshot_observer = ScreenshotObserver()
         # Registered observers (WorkflowObserver protocol)
         from ..observers.base import WorkflowObserver
         self._observers: list[WorkflowObserver] = []
@@ -256,6 +259,12 @@ class ContextServer:
             target=self._session_watch_loop, daemon=True, name="session-watcher"
         )
         session_thread.start()
+
+        # Start screenshot observer thread
+        screenshot_thread = threading.Thread(
+            target=self._screenshot_watch_loop, daemon=True, name="screenshot-observer"
+        )
+        screenshot_thread.start()
 
         # Start HTTP server
         self._run_http()
@@ -394,29 +403,49 @@ class ContextServer:
         logger.info("Git watcher started")
         while not self._stop_event.is_set():
             try:
-                # Use the observer protocol to get structured updates
-                updates = self.git_watcher.check()
-                snapshots = self.git_watcher.get_recent_snapshots(limit=5)
-
-                if updates:
+                # check_all() returns only NEW snapshots since last poll
+                snapshots = self.git_watcher.check_all()
+                if snapshots:
                     conn = get_connection()
                     try:
-                        for update in updates:
-                            self._apply_workflow_update(update, conn)
-
-                        # Also store raw snapshots to DB
+                        # Get workflow updates from the new snapshots
                         for snap in snapshots:
-                            if snap.timestamp > time.time() - 15:  # only recent
-                                data = snap.to_dict()
-                                wf = self.clusterer.get_active_workflow()
-                                data["workflow_id"] = wf.id if wf else None
-                                insert_code_snapshot(conn, data)
-                                logger.info(
-                                    "Code snapshot: %s %s (+%d/-%d) %d files",
-                                    snap.project, snap.change_type,
-                                    snap.total_additions, snap.total_deletions,
-                                    len(snap.file_diffs),
-                                )
+                            # Build workflow updates inline (same logic as check())
+                            from ..observers.base import WorkflowUpdate
+                            keywords = [snap.project]
+                            if snap.branch and snap.branch not in ("main", "master"):
+                                keywords.append(snap.branch)
+                            for fd in snap.file_diffs[:5]:
+                                stem = fd.path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+                                if len(stem) > 2:
+                                    keywords.append(stem)
+
+                            files = [fd.path for fd in snap.file_diffs]
+                            for fd in snap.file_diffs[:5]:
+                                code_change = ""
+                                if fd.status == "A":
+                                    code_change = f"created {fd.path}"
+                                elif fd.additions:
+                                    code_change = f"modified {fd.path}"
+                                if code_change:
+                                    self._apply_workflow_update(WorkflowUpdate(
+                                        keywords=keywords,
+                                        code_change=code_change,
+                                        project=snap.project,
+                                        files=files,
+                                    ), conn)
+
+                            # Store snapshot to DB
+                            data = snap.to_dict()
+                            wf = self.clusterer.get_active_workflow()
+                            data["workflow_id"] = wf.id if wf else None
+                            insert_code_snapshot(conn, data)
+                            logger.info(
+                                "Code snapshot: %s %s (+%d/-%d) %d files",
+                                snap.project, snap.change_type,
+                                snap.total_additions, snap.total_deletions,
+                                len(snap.file_diffs),
+                            )
                     finally:
                         conn.close()
             except Exception:
@@ -445,6 +474,28 @@ class ContextServer:
             except Exception:
                 logger.exception("Error in session watcher loop")
             self._stop_event.wait(timeout=15.0)
+
+    def _screenshot_watch_loop(self) -> None:
+        """Background loop that reads screenshots and extracts context via OCR."""
+        logger.info("Screenshot observer started")
+        while not self._stop_event.is_set():
+            try:
+                updates = self.screenshot_observer.check()
+                if updates:
+                    conn = get_connection()
+                    try:
+                        for update in updates:
+                            self._apply_workflow_update(update, conn)
+                            logger.debug(
+                                "Screenshot update: %s (%s)",
+                                update.breadcrumb[:60] if update.breadcrumb else "?",
+                                update.tool or "unknown",
+                            )
+                    finally:
+                        conn.close()
+            except Exception:
+                logger.exception("Error in screenshot observer loop")
+            self._stop_event.wait(timeout=10.0)
 
     def _run_http(self) -> None:
         """Run the HTTP server."""

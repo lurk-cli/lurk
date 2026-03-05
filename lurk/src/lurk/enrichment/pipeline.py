@@ -78,6 +78,26 @@ class EnrichmentPipeline:
         title = event.get("title") or ""
         ts = event.get("ts", 0)
 
+        # Handle screenshot events — mark as enriched with basic metadata
+        if event_type == "screenshot":
+            data = {}
+            if event.get("data"):
+                try:
+                    data = json.loads(event["data"]) if isinstance(event["data"], str) else event["data"]
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            insert_enriched_event(conn, {
+                "event_id": event["id"],
+                "ts": ts,
+                "app": app,
+                "title": title or f"screenshot:{data.get('width', '?')}x{data.get('height', '?')}",
+                "activity": "screen_capture",
+                "sub_activity": "",
+                "intent": "",
+                "interruptibility": "",
+            })
+            return
+
         # Only parse title_change and app_switch events
         if event_type not in ("title_change", "app_switch"):
             return

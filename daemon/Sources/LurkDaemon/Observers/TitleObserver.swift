@@ -79,7 +79,7 @@ final class TitleObserver: Observer {
         // AX call succeeded — reset backoff
         healthTracker.recordSuccess(bundleId: bundleId)
 
-        guard let capturedTitle = title else { return }
+        let capturedTitle = title ?? appName  // fallback to app name for terminal apps
 
         // Only emit if title or app changed
         if capturedTitle != lastTitle || appName != lastApp {

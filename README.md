@@ -112,24 +112,19 @@ No integrations. No plugins. No API keys to configure.
 
 ```bash
 pip install 'lurk[all]'
-
-lurk onboard --install-daemon
+lurk
 ```
 
-The onboard wizard builds the native daemon, configures auto-start, prompts for Accessibility permission, and detects installed AI tools to automatically set up MCP.
+That's it. One command builds the daemon, starts everything, connects your AI tools, and opens Accessibility settings if needed. No wizards, no prompts.
 
 ```bash
-lurk status      # daemon running?
-lurk context -p  # what does lurk see?
+lurk           # start (or check status if already running)
+lurk stop      # stop everything
+lurk status    # what's running and connected
+lurk context   # see what lurk observes right now
 ```
 
-### Connect AI tools
-
-```bash
-lurk connect claude-code   # Claude Code MCP
-lurk connect cursor        # Cursor MCP
-lurk connect codex         # Codex CLI
-```
+Need to connect more tools later? `lurk connect` auto-detects and connects them.
 
 ### Browser extension
 
@@ -209,10 +204,9 @@ Observations ──→ Workflow Context ──→ Prompt Generation ──→ Ag
 ## Commands
 
 ```
-lurk onboard          Guided setup — daemon, permissions, AI tool connections
-lurk start            Start the daemon and context engine
+lurk                  Start everything (or show status if running)
 lurk stop             Stop everything
-lurk status           Show daemon status and event counts
+lurk status           What's running, connected tools, event counts
 
 lurk context          Current context snapshot
 lurk context -p       Natural language context prompt
@@ -225,19 +219,12 @@ lurk search <term>    Search event history
 
 lurk pause            Pause observation
 lurk resume           Resume observation
-
 lurk copy             Copy context to clipboard
-lurk copy --watch     Keep clipboard updated every 30s
-lurk connect <tool>   Connect an AI tool (claude-code, cursor, codex)
-lurk serve-mcp        MCP server (stdio)
-lurk serve-http       HTTP API at localhost:4141
+lurk connect          Auto-detect and connect AI tools
 
-lurk config           Open config in $EDITOR
 lurk install          Set up auto-start on login
-lurk uninstall        Remove auto-start
+lurk config           Open config in $EDITOR
 lurk purge            Clean up old data
-lurk delete           Delete captured events
-lurk debug <title>    Test a title through the parser pipeline
 ```
 
 ---
