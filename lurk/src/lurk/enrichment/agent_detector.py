@@ -64,9 +64,22 @@ def detect_agent(app: str, title: str, bundle_id: str | None = None) -> AgentDet
             agent_state=_classify_openclaw_state(title),
         )
 
-    # Copilot Workspace — runs in browser
-    if _is_browser(app_lower, bundle_id) and "copilot workspace" in title_lower:
-        return AgentDetection(agent_tool="copilot_workspace", agent_state="working")
+    # Codex — runs in terminal apps
+    if _is_terminal(app_lower, bundle_id) and "codex" in title_lower:
+        return AgentDetection(
+            agent_tool="codex",
+            agent_state=_classify_codex_state(title),
+        )
+
+    # ChatGPT — runs in browser
+    if _is_browser(app_lower, bundle_id) and "chatgpt" in title_lower:
+        return AgentDetection(agent_tool="chatgpt", agent_state="working")
+
+    # GitHub Copilot — runs in browser or editor
+    if _is_browser(app_lower, bundle_id) and "copilot" in title_lower:
+        if "workspace" in title_lower:
+            return AgentDetection(agent_tool="copilot_workspace", agent_state="working")
+        return AgentDetection(agent_tool="copilot", agent_state="working")
 
     return None
 
@@ -142,6 +155,25 @@ def _classify_aider_state(title: str) -> str:
 
     if any(s in t for s in ["thinking", "editing", "applying"]):
         return "working"
+
+    return "working"
+
+
+def _classify_codex_state(title: str) -> str:
+    """Classify Codex state from terminal title."""
+    t = title.lower()
+
+    if "error:" in t or "error " in t:
+        return "errored"
+
+    if any(s in t for s in ["[y/n]", "approve", "allow", "confirm"]):
+        return "blocked"
+
+    if any(s in t for s in ["thinking", "reading", "writing", "running", "editing"]):
+        return "working"
+
+    if any(s in t for s in ["done", "completed", "$ "]):
+        return "completed"
 
     return "working"
 

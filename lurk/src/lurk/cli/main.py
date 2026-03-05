@@ -64,9 +64,9 @@ def start():
     console.print("[bold green]lurk is running.[/bold green]")
     console.print()
     console.print("Quick start:")
-    console.print("  Claude Code:  [cyan]claude mcp add lurk -- lurk serve-mcp[/cyan]")
-    console.print("  HTTP API:     [cyan]curl localhost:4141/context/now[/cyan]")
-    console.print("  View context: [cyan]lurk context[/cyan]")
+    console.print("  Connect tools: [cyan]lurk connect[/cyan]")
+    console.print("  View context:  [cyan]lurk context[/cyan]")
+    console.print("  HTTP API:      [cyan]curl localhost:4141/context/now[/cyan]")
 
 
 @app.command()
@@ -792,13 +792,71 @@ def _offer_build_daemon() -> str | None:
 
 
 @app.command()
-def setup():
-    """Interactive guided setup — build daemon, configure permissions, start lurk."""
+def connect(
+    tool: Optional[str] = typer.Argument(None, help="Tool to connect (claude-code, cursor, codex)"),
+):
+    """Connect lurk to an AI tool's MCP integration."""
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+    from lurk.config.connect import (
+        SUPPORTED_TOOLS,
+        connect_tool,
+        detect_installed_tools,
+        is_connected,
+    )
+
+    if tool is None:
+        # Interactive — show detected tools and let user pick
+        detected = detect_installed_tools()
+        if not detected:
+            console.print("[yellow]No supported AI tools detected.[/yellow]")
+            console.print(f"  Supported: {', '.join(SUPPORTED_TOOLS.values())}")
+            return
+
+        console.print("[bold]Detected AI tools:[/bold]")
+        for t in detected:
+            name = SUPPORTED_TOOLS[t]
+            connected = is_connected(t)
+            status = "[green]connected[/green]" if connected else "[dim]not connected[/dim]"
+            console.print(f"  {name}: {status}")
+
+        console.print()
+        unconnected = [t for t in detected if not is_connected(t)]
+        if not unconnected:
+            console.print("[green]All detected tools are already connected.[/green]")
+            return
+
+        for t in unconnected:
+            name = SUPPORTED_TOOLS[t]
+            if typer.confirm(f"  Connect {name}?", default=True):
+                ok, msg = connect_tool(t)
+                icon = "[green]✓[/green]" if ok else "[red]✗[/red]"
+                console.print(f"  {icon} {msg}")
+        return
+
+    # Direct tool connection
+    tool = tool.lower()
+    if tool not in SUPPORTED_TOOLS:
+        console.print(f"[red]Unknown tool: {tool}[/red]")
+        console.print(f"  Supported: {', '.join(SUPPORTED_TOOLS)}")
+        raise typer.Exit(1)
+
+    ok, msg = connect_tool(tool)
+    icon = "[green]✓[/green]" if ok else "[red]✗[/red]"
+    console.print(f"  {icon} {msg}")
+
+
+@app.command()
+def onboard(
+    install_daemon: bool = typer.Option(False, "--install-daemon", help="Build and install the native daemon"),
+):
+    """Interactive guided setup — build daemon, configure permissions, connect AI tools, start lurk."""
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
     from lurk.config.install import find_daemon_binary, full_install, check_accessibility
+    from lurk.config.connect import detect_installed_tools, connect_tool, is_connected, SUPPORTED_TOOLS
 
-    console.print("[bold]lurk setup[/bold]")
+    console.print("[bold]lurk onboard[/bold]")
     console.print()
 
     # Step 1: Find or build daemon
@@ -806,15 +864,16 @@ def setup():
     if daemon_path:
         console.print(f"  [green]✓[/green] Daemon found at {daemon_path}")
     else:
-        import shutil as _shutil
-        if not _shutil.which("swift"):
-            console.print("[red]Swift not found. Install Xcode Command Line Tools:[/red]")
-            console.print("  [cyan]xcode-select --install[/cyan]")
-            raise typer.Exit(1)
+        if not install_daemon:
+            import shutil as _shutil
+            if not _shutil.which("swift"):
+                console.print("[red]Swift not found. Install Xcode Command Line Tools:[/red]")
+                console.print("  [cyan]xcode-select --install[/cyan]")
+                raise typer.Exit(1)
 
-        console.print("  Daemon binary not found.")
-        if not typer.confirm("  Build it now?", default=True):
-            raise typer.Exit(0)
+            console.print("  Daemon binary not found.")
+            if not typer.confirm("  Build it now?", default=True):
+                raise typer.Exit(0)
 
         daemon_path = _build_daemon()
         if daemon_path is None:
@@ -840,33 +899,42 @@ def setup():
         console.print("  Add [cyan]lurk-daemon[/cyan] and toggle it on.")
         console.print("  Then verify with: [cyan]lurk status[/cyan]")
 
-    # Step 4: Install optional extras
+    # Step 4: Detect and connect AI tools
     console.print()
-    console.print("[bold]Installing optional extras...[/bold]")
-    extras = [
-        ("lurk[mcp]", "MCP server (Claude Code / Cursor)"),
-        ("lurk[http]", "HTTP API"),
-        ("lurk[llm]", "LLM-enhanced context"),
-    ]
-    for spec, label in extras:
-        result = subprocess.run(
-            ["pipx", "inject", "lurk", spec],
-            capture_output=True, text=True,
-        )
-        if result.returncode == 0:
-            console.print(f"  [green]✓[/green] {label}")
-        else:
-            console.print(f"  [yellow]![/yellow] {label} — install later with: [cyan]pipx inject lurk \"{spec}\"[/cyan]")
+    console.print("[bold]Detecting AI tools...[/bold]")
+    detected = detect_installed_tools()
+
+    if detected:
+        for tool in detected:
+            name = SUPPORTED_TOOLS[tool]
+            if is_connected(tool):
+                console.print(f"  [green]✓[/green] {name} already connected")
+            else:
+                if typer.confirm(f"  Connect lurk to {name}?", default=True):
+                    ok, msg = connect_tool(tool)
+                    icon = "[green]✓[/green]" if ok else "[red]✗[/red]"
+                    console.print(f"  {icon} {msg}")
+                else:
+                    console.print(f"  [dim]—[/dim] Skipped {name} (run [cyan]lurk connect {tool}[/cyan] later)")
+    else:
+        console.print("  [dim]No AI tools detected. Connect later with [cyan]lurk connect[/cyan][/dim]")
 
     # Step 5: Start
     console.print()
     start()
 
-    # Step 6: Success
     console.print()
-    console.print("[bold]Connect to your AI tools:[/bold]")
-    console.print("  [cyan]claude mcp add lurk -- lurk serve-mcp[/cyan]   Claude Code")
-    console.print("  [cyan]lurk serve-http[/cyan]                        HTTP API at :4141")
+    console.print("[bold green]lurk is ready.[/bold green]")
+    console.print("  [cyan]lurk context[/cyan]      see what lurk observes")
+    console.print("  [cyan]lurk agents[/cyan]       see active AI agents")
+    console.print("  [cyan]lurk connect[/cyan]      connect more tools later")
+
+
+# Keep `setup` as an alias for `onboard` for backwards compatibility
+@app.command(hidden=True)
+def setup():
+    """Alias for onboard."""
+    onboard(install_daemon=False)
 
 
 def _find_daemon() -> str | None:

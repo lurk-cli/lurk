@@ -135,10 +135,13 @@ lurk recognizes AI agents from observable signals without any integration:
 | Agent | Detection method |
 |-------|-----------------|
 | Claude Code | Terminal title: `claude — Thinking...`, `claude — Allow tool?` |
+| Codex | Terminal title: `codex` CLI patterns |
+| ChatGPT | Browser tab title: `ChatGPT` |
 | Cursor | Window title during composer/agent mode |
+| Copilot | Editor integration and browser tab patterns |
+| Copilot Workspace | Browser tab title patterns |
 | Aider | Terminal title: `aider — Thinking` |
 | OpenClaw / MyClaw | Browser tab title patterns |
-| Copilot Workspace | Browser tab title patterns |
 | Goose | Terminal title patterns |
 
 Agent states are inferred from title changes over time — a burst of rapid file changes means "working", a stable title after a burst means "completed", no change for an unusually long time means "possibly stuck".
@@ -153,7 +156,7 @@ npm install -g lurk-cli@latest
 lurk onboard --install-daemon
 ```
 
-The onboard wizard checks dependencies, builds the native daemon, installs the CLI, configures auto-start, and prompts for Accessibility permission — all in one step.
+The onboard wizard checks dependencies, builds the native daemon, installs the CLI, configures auto-start, prompts for Accessibility permission, and detects installed AI tools (Claude Code, Cursor) to automatically configure MCP integration — all in one step.
 
 **Verify it's working:**
 ```bash
@@ -166,37 +169,30 @@ lurk context     # what does lurk see right now?
 curl -fsSL https://raw.githubusercontent.com/zasanao/lurk/main/install.sh | bash
 ```
 
-### Connect to your AI tools (optional)
+### Reconnect AI tools
 
-Only needed if you use Claude Code, Cursor, or want the HTTP API.
+The onboard wizard auto-detects and connects your AI tools. If you need to reconnect or add a tool later:
 
-**Claude Code:**
 ```bash
-pipx inject lurk "lurk[mcp]"
-claude mcp add lurk -- lurk serve-mcp
+lurk connect claude-code   # configure Claude Code MCP integration
+lurk connect cursor        # configure Cursor MCP integration
+lurk connect codex         # configure Codex CLI integration
 ```
-
-**Cursor:**
-```bash
-pipx inject lurk "lurk[mcp]"
-```
-Add to Cursor MCP config: `{ "lurk": { "command": "lurk", "args": ["serve-mcp"] } }`
 
 **HTTP API:**
 ```bash
-pipx inject lurk "lurk[http]"
-lurk serve-http
+lurk serve-http            # start HTTP API at localhost:4141
 ```
 
 **LLM-enhanced context (optional):**
 ```bash
-pipx inject lurk "lurk[llm]"
-lurk config    # set llm.provider and llm.model
+lurk config                # set llm.provider and llm.model
 ```
 
 ## Commands
 
 ```
+lurk onboard        Guided setup — daemon, permissions, AI tool connections
 lurk start          Start the daemon and context engine
 lurk stop           Stop everything
 lurk status         Show daemon status and event counts
@@ -211,6 +207,7 @@ lurk search <term>  Search event history
 lurk pause          Pause observation (daemon stays running)
 lurk resume         Resume observation
 
+lurk connect <tool>  Connect an AI tool (claude-code, cursor, codex)
 lurk serve-mcp      Start MCP server (stdio, for Claude Code / Cursor)
 lurk serve-http     Start HTTP API at localhost:4141
 
