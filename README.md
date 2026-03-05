@@ -1,7 +1,7 @@
 <p align="center">
-  <h1 align="center">lurk</h1>
-  <p align="center"><strong>Your AI agents have no idea what each other are doing. lurk fixes that.</strong></p>
+  <img src="assets/lurk.png" alt="lurk" width="400" />
 </p>
+<p align="center"><strong>Your AI agents have no idea what each other are doing. lurk fixes that.</strong></p>
 
 <p align="center">
   <a href="#get-started">Get started</a> &middot;
