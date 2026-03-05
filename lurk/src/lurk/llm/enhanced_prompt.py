@@ -1,6 +1,13 @@
-"""LLM-enhanced prompt generation — richer, more natural context preambles.
+"""LLM-enhanced prompt generation — produces context that makes agents perform better.
 
-Falls back to rules-based prompt.py if LLM is unavailable.
+Working backwards from what Anthropic recommends for effective agent prompts:
+the consuming agent needs to understand the user's GOAL, not their app. It needs
+RELEVANT STATE, not an activity log. It needs GROUNDING specifics (names, projects,
+artifacts), not abstract descriptions. And it needs MINIMAL, HIGH-SIGNAL tokens —
+every word should earn its place.
+
+The LLM synthesizes raw observations into this. The rules-based fallback does
+its best without synthesis.
 """
 
 from __future__ import annotations
@@ -17,20 +24,36 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("lurk.llm")
 
+# This system prompt is the most important part of lurk's output quality.
+# It tells the LLM how to turn raw observations into context that makes
+# the consuming agent perform better.
 SYSTEM_PROMPT = """\
-You are a context summarizer for an AI coding assistant. Given structured data \
-about what a developer is currently doing, write a concise natural language \
-preamble (2-4 sentences). This preamble will be injected into the system prompt \
-of AI tools so they understand the user's current context without being told.
+You are generating context for an AI agent's system prompt. Your output will be \
+injected so the agent understands what the user is working on without being told.
+
+Your job: synthesize raw observations into a brief, useful context preamble that \
+helps the agent be immediately helpful.
+
+What makes good context for an agent:
+1. GOAL — What is the user trying to accomplish? Infer from their activity trail. \
+Not "they're in Excel" but "they're analyzing Q3 revenue data."
+2. STATE — Where are they in the task? What's done, what's in progress? \
+Not "they edited 5 files" but "they've built the data model and are now wiring up the API."
+3. GROUNDING — Specific names, projects, documents, topics that let the agent \
+give concrete answers. Not "a spreadsheet" but "the Q3 Revenue Forecast spreadsheet."
+4. CONNECTIONS — How do recent activities relate? If they read an email about \
+Project Alpha then opened a spreadsheet, say so. Don't list disconnected facts.
 
 Rules:
-- Be concise and factual. No speculation.
-- Start with what the user is doing right now.
-- Include duration, research trail, recent files, and tickets if provided.
-- Do NOT include greetings, opinions, or meta-commentary.
-- Do NOT mention lurk or the context system — just describe what the user is doing.
-- Use present tense. Write as if briefing a colleague.
-- Stay within the token budget."""
+- Write 2-4 sentences of natural prose. No bullet points, no labels, no formatting.
+- Synthesize, don't list. Connect the dots between activities.
+- Be specific — use actual names, titles, and topics from the data.
+- Infer the goal from the activity pattern. Research + spreadsheet + email = preparing something.
+- Write in present tense, as if briefing a colleague about what someone is doing right now.
+- Do NOT mention the observation system, context system, or any meta-commentary.
+- Do NOT speculate beyond what the data supports. If you can't infer the goal, \
+describe the current activity with specifics.
+- Stay within the token budget. Every word should help the consuming agent."""
 
 
 def generate_enhanced_prompt(
@@ -56,9 +79,9 @@ def generate_enhanced_prompt(
             return fallback
 
         user_prompt = (
-            f"Generate a concise context preamble ({max_tokens} tokens max) "
-            f"for a {tool} AI tool based on this developer's current state:\n\n"
-            f"{context_data}"
+            f"Synthesize this into a {max_tokens}-token context preamble for a "
+            f"{tool} AI tool. Focus on the user's goal and current state, not "
+            f"raw observations:\n\n{context_data}"
         )
 
         response = provider.generate(user_prompt, system=SYSTEM_PROMPT, max_tokens=max_tokens)
@@ -75,59 +98,92 @@ def generate_enhanced_prompt(
 
 
 def _build_context_data(model: ContextModel) -> str:
-    """Build structured context data string for the LLM."""
+    """Build the observation data that the LLM will synthesize.
+
+    Organized by signal value, not by source. The LLM's job is to connect
+    these into a coherent picture of what the user is doing and why.
+    """
     now = model.now
     session = model.session
-    lines = []
+    sections = []
 
+    # --- What they're doing right now ---
+    current = []
     if now.app:
-        lines.append(f"App: {now.app}")
-    if now.file:
-        lines.append(f"File: {now.file}")
-    if now.project:
-        lines.append(f"Project: {now.project}")
-    if now.language:
-        lines.append(f"Language: {now.language}")
-    if now.activity and now.activity != "unknown":
-        lines.append(f"Activity: {now.activity}")
+        current.append(f"Currently in: {now.app}")
+    if now.document_name:
+        current.append(f"Document: \"{now.document_name}\"")
+    if now.file and now.project:
+        current.append(f"Editing: {now.file} in {now.project}")
+    elif now.file:
+        current.append(f"Editing: {now.file}")
+    elif now.project:
+        current.append(f"Project: {now.project}")
+    if now.activity and now.activity not in ("unknown", "idle"):
+        current.append(f"Activity: {now.activity}")
     if now.sub_activity:
-        lines.append(f"Sub-activity: {now.sub_activity}")
-    if now.intent:
-        lines.append(f"Intent: {now.intent}")
-    if now.duration_seconds > 60:
-        lines.append(f"Duration: {int(now.duration_seconds / 60)} minutes")
-    if now.input_state != "idle":
-        lines.append(f"Input state: {now.input_state}")
+        current.append(f"Specifically: {now.sub_activity}")
+    if now.language:
+        current.append(f"Language: {now.language}")
     if now.ticket:
-        lines.append(f"Ticket: {now.ticket}")
+        current.append(f"Ticket: {now.ticket}")
+    if now.branch:
+        current.append(f"Branch: {now.branch}")
+    if now.duration_seconds > 120:
+        current.append(f"Been at this: {int(now.duration_seconds / 60)} minutes")
+    if current:
+        sections.append("CURRENT:\n" + "\n".join(current))
 
-    # Session context
-    if session.files_edited:
-        recent = session.files_edited[-5:]
-        lines.append(f"Recent files: {', '.join(recent)}")
-    if session.research_trail:
-        topics = [r.topic for r in session.research_trail[-3:] if r.topic]
-        if topics:
-            lines.append(f"Research topics: {', '.join(topics)}")
-    if session.tickets_worked:
-        lines.append(f"Tickets: {', '.join(session.tickets_worked[-3:])}")
-    if session.focus_blocks:
-        last = session.focus_blocks[-1]
-        lines.append(f"Focus block: {int(last.duration_seconds / 60)} min on {last.project or 'current project'}")
-    if session.context_switches > 0:
-        lines.append(f"Context switches: {session.context_switches}")
+    # --- What they've been doing (the trail that reveals intent) ---
+    narrative = session.narrative()
+    if narrative:
+        sections.append(f"ACTIVITY TRAIL:\n{narrative}")
 
-    # Monitor context
-    if len(now.monitors) > 1:
+    # --- Reference material (what's open alongside) ---
+    refs = now.get_reference_activities() if hasattr(now, "get_reference_activities") else []
+    if refs:
+        ref_lines = [f"- {r.label()} in {r.app}" for r in refs[:3]]
+        sections.append("ALSO OPEN FOR REFERENCE:\n" + "\n".join(ref_lines))
+    elif len(now.monitors) > 1:
         for m in now.monitors:
-            if m.monitor_id != now.active_monitor and m.app:
-                lines.append(f"Secondary monitor: {m.app} — {m.title or 'unknown'}")
+            if m.monitor_id != now.active_monitor and m.app and m.title:
+                sections.append(f"SECONDARY MONITOR: {m.app} showing \"{m.title}\"")
                 break
 
-    # Cross-session
+    # --- Research (what they've been looking up) ---
+    if session.research_trail:
+        topics = [r.topic for r in session.research_trail[-5:] if r.topic]
+        if topics:
+            sections.append(f"RECENTLY RESEARCHED: {', '.join(topics)}")
+
+    # --- Agent work product (code changes, session context) ---
+    agent_context = _get_agent_context()
+    if agent_context:
+        sections.append(f"RECENT AGENT WORK:\n{agent_context}")
+
+    # --- Cross-session continuity ---
     if model.recent_sessions:
         last = model.recent_sessions[-1]
         if last.projects:
-            lines.append(f"Previous session projects: {', '.join(last.projects[:3])}")
+            import time
+            age_hours = (time.time() - last.end_time) / 3600
+            if age_hours < 24:
+                sections.append(
+                    f"EARLIER TODAY: worked on {', '.join(last.projects[:3])}"
+                )
 
-    return "\n".join(lines)
+    return "\n\n".join(sections)
+
+
+def _get_agent_context() -> str | None:
+    """Get context from recent AI agent sessions."""
+    try:
+        from ..observers.session_watcher import SessionWatcher
+        watcher = SessionWatcher()
+        watcher.check_all()
+        session = watcher.get_active_session()
+        if session:
+            return session.summary_text()
+    except Exception:
+        pass
+    return None

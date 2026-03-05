@@ -180,6 +180,9 @@ class ContextServer:
         # Git watcher — observes what coding agents actually change
         from ..observers.git_watcher import GitWatcher
         self.git_watcher = GitWatcher()
+        # Session watcher — reads agent conversation logs
+        from ..observers.session_watcher import SessionWatcher
+        self.session_watcher = SessionWatcher()
         # Initialize LLM provider (optional)
         llm_config = load_llm_config()
         self.llm_provider: LLMProvider | None = create_provider(llm_config)
@@ -211,6 +214,12 @@ class ContextServer:
             target=self._git_watch_loop, daemon=True, name="git-watcher"
         )
         git_thread.start()
+
+        # Start session watcher thread
+        session_thread = threading.Thread(
+            target=self._session_watch_loop, daemon=True, name="session-watcher"
+        )
+        session_thread.start()
 
         # Start HTTP server
         self._run_http()
@@ -395,6 +404,47 @@ class ContextServer:
                 logger.exception("Error in git watcher loop")
             self._stop_event.wait(timeout=10.0)
 
+    def _session_watch_loop(self) -> None:
+        """Background loop that reads agent conversation logs."""
+        logger.info("Session watcher started")
+        while not self._stop_event.is_set():
+            try:
+                updated = self.session_watcher.check_all()
+                if updated:
+                    conn = get_connection()
+                    try:
+                        for session in updated:
+                            # Feed session context into workflows
+                            from ..context.workflows import _WORD_RE, _STOP_WORDS
+                            keywords = [session.project]
+                            if session.branch and session.branch not in ("main", "master"):
+                                keywords.append(session.branch)
+                            # Extract keywords from user messages
+                            for msg in session.user_messages[-3:]:
+                                words = _WORD_RE.findall(msg.lower())
+                                keywords.extend(w for w in words if w not in _STOP_WORDS and len(w) > 2)
+
+                            if keywords:
+                                workflow_id = self.clusterer._match_or_create(keywords[:15], conn)
+                                wf = self.clusterer.get_workflow(workflow_id)
+                                if wf:
+                                    wf.add_project(session.project)
+                                    wf.add_tool("Claude Code")
+                                    for fe in session.files_edited[-5:]:
+                                        wf.add_file(fe.file_path)
+
+                            logger.info(
+                                "Session update: %s (%s) — %d msgs, %d edits, %d tool calls",
+                                session.project, session.session_id[:8],
+                                len(session.user_messages), session.total_edits,
+                                session.total_tool_calls,
+                            )
+                    finally:
+                        conn.close()
+            except Exception:
+                logger.exception("Error in session watcher loop")
+            self._stop_event.wait(timeout=15.0)
+
     def _run_http(self) -> None:
         """Run the HTTP server."""
         try:
@@ -493,6 +543,19 @@ class ContextServer:
             prompt = self._build_workflow_prompt(wf)
             return PlainTextResponse(prompt)
 
+        async def agent_sessions(request):
+            """Get recent AI agent conversation sessions."""
+            sessions = self.session_watcher.get_recent_sessions(limit=5)
+            return JSONResponse([s.to_dict() for s in sessions])
+
+        async def agent_session_context(request):
+            """Get the actual conversation context from the active agent session."""
+            session_id = request.query_params.get("id")
+            text = self.session_watcher.build_session_context(session_id=session_id)
+            if not text:
+                return PlainTextResponse("No active agent session detected.")
+            return PlainTextResponse(text)
+
         async def code_changes(request):
             """Get recent code snapshots — actual diffs of what agents wrote."""
             project = request.query_params.get("project")
@@ -539,6 +602,8 @@ class ContextServer:
                 Route("/context/capture", context_capture, methods=["POST"]),
                 Route("/context/workflow-prompt", workflow_prompt),
                 Route("/workflows", workflows_list),
+                Route("/sessions", agent_sessions),
+                Route("/sessions/context", agent_session_context),
                 Route("/changes", code_changes),
                 Route("/changes/summary", code_changes_summary),
                 Route("/context", context_full),
@@ -637,6 +702,13 @@ class ContextServer:
                             wfs.append(mwf)
                     wfs.sort(key=lambda w: w.updated_ts, reverse=True)
                     self._json_response([w.to_dict() for w in wfs])
+                elif path == "/sessions":
+                    sessions = server_self.session_watcher.get_recent_sessions(limit=5)
+                    self._json_response([s.to_dict() for s in sessions])
+                elif path == "/sessions/context":
+                    sid = params.get("id", [None])[0]
+                    text = server_self.session_watcher.build_session_context(session_id=sid)
+                    self._text_response(text or "No active agent session detected.")
                 elif path == "/changes":
                     from ..store.database import fetch_recent_code_snapshots
                     proj = params.get("project", [None])[0]

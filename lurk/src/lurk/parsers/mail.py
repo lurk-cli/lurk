@@ -26,12 +26,14 @@ class MailParser(AppParser):
         if not title:
             return ctx
 
-        # Mail title is usually the subject line or mailbox name
-        # Don't store subject (could be sensitive) — just note activity
         lower = title.lower()
         if any(w in lower for w in ["inbox", "sent", "draft", "archive", "trash"]):
             ctx.sub_activity = "email_triage"
         elif "new message" in lower or "compose" in lower:
             ctx.sub_activity = "email_composing"
+        else:
+            # Title is likely the email subject — capture it as topic for context
+            ctx.sub_activity = "email_reading"
+            ctx.topic = title
 
         return ctx

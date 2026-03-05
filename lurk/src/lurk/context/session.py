@@ -56,6 +56,16 @@ class ResearchEntry:
 
 
 @dataclass
+class ActivityBreadcrumb:
+    """A snapshot of what the user was doing at a point in time."""
+    ts: float
+    description: str  # e.g. "reading email about project Alpha", "editing Q3 Revenue spreadsheet"
+
+    def to_dict(self) -> dict:
+        return {"ts": self.ts, "description": self.description}
+
+
+@dataclass
 class SessionState:
     """State of the current work session."""
     start_time: float = field(default_factory=time.time)
@@ -66,6 +76,8 @@ class SessionState:
     tools_used: list[str] = field(default_factory=list)
     context_switches: int = 0
     focus_blocks: list[FocusBlock] = field(default_factory=list)
+    # Running narrative — breadcrumbs of what the user has been doing
+    breadcrumbs: list[ActivityBreadcrumb] = field(default_factory=list)
 
     # Caps
     MAX_PROJECTS = 20
@@ -74,6 +86,7 @@ class SessionState:
     MAX_RESEARCH = 50
     MAX_TOOLS = 20
     MAX_FOCUS_BLOCKS = 20
+    MAX_BREADCRUMBS = 30
 
     @property
     def duration_seconds(self) -> float:
@@ -108,6 +121,22 @@ class SessionState:
             if len(self.tools_used) > self.MAX_TOOLS:
                 self.tools_used = self.tools_used[-self.MAX_TOOLS:]
 
+    def add_breadcrumb(self, ts: float, description: str) -> None:
+        """Record what the user was doing — dedupes consecutive identical descriptions."""
+        if self.breadcrumbs and self.breadcrumbs[-1].description == description:
+            return  # Same activity, skip
+        self.breadcrumbs.append(ActivityBreadcrumb(ts=ts, description=description))
+        if len(self.breadcrumbs) > self.MAX_BREADCRUMBS:
+            self.breadcrumbs = self.breadcrumbs[-self.MAX_BREADCRUMBS:]
+
+    def narrative(self) -> str:
+        """Build a natural narrative of what the user has been doing this session."""
+        if not self.breadcrumbs:
+            return ""
+        recent = self.breadcrumbs[-6:]
+        descriptions = list(dict.fromkeys(b.description for b in recent))
+        return " → ".join(descriptions)
+
     def to_dict(self) -> dict:
         return {
             "start_time": self.start_time,
@@ -119,6 +148,7 @@ class SessionState:
             "tools_used": self.tools_used,
             "context_switches": self.context_switches,
             "focus_blocks": [f.to_dict() for f in self.focus_blocks],
+            "narrative": self.narrative(),
         }
 
 
@@ -137,6 +167,48 @@ class CompactSession:
 
     def to_dict(self) -> dict:
         return self.__dict__
+
+
+def _describe_activity(
+    app: str, activity: str, project: str | None, file: str | None,
+    topic: str | None, document_name: str | None, sub_activity: str | None,
+) -> str:
+    """Turn an enriched event into a natural description of what the user is doing."""
+    if document_name:
+        if sub_activity == "spreadsheet":
+            return f"working on spreadsheet \"{document_name}\""
+        if sub_activity == "presentation":
+            return f"working on presentation \"{document_name}\""
+        return f"working on \"{document_name}\""
+
+    if sub_activity == "email_reading" and topic:
+        return f"reading email about \"{topic}\""
+    if sub_activity == "email_composing":
+        return "composing an email"
+    if sub_activity == "email_triage":
+        return "going through email"
+
+    if activity == "researching" and topic:
+        return f"researching \"{topic}\""
+
+    if activity == "coding" and file and project:
+        return f"editing {file} in {project}"
+    if activity == "coding" and project:
+        return f"coding on {project}"
+
+    if sub_activity == "code_review" and topic:
+        return f"reviewing \"{topic}\""
+
+    if activity == "communicating" and topic:
+        return f"in a conversation about \"{topic}\""
+
+    if activity == "browsing" and topic:
+        return f"looking at \"{topic}\""
+
+    if activity not in ("unknown", "idle") and app:
+        return f"{activity} in {app}"
+
+    return ""
 
 
 class SessionTracker:
@@ -217,6 +289,13 @@ class SessionTracker:
             self._last_research_start = 0
             self._last_research_topic = None
             self._last_research_domain = None
+
+        # Build breadcrumb — describe what the user is doing in natural language
+        crumb = _describe_activity(app, activity, project, file, topic,
+                                   event.get("document_name"),
+                                   event.get("sub_activity"))
+        if crumb:
+            self.current_session.add_breadcrumb(ts, crumb)
 
         self._last_app = app
         self._last_project = project

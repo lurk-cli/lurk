@@ -214,6 +214,16 @@ def create_mcp_server():
         return text
 
     @mcp.tool()
+    def get_agent_session_context() -> str:
+        """Get the conversation context from the most recent AI agent session — what the user asked, what code was written, what files were modified, what errors were hit. This is the actual interaction that happened, not just metadata."""
+        _refresh()
+        from ..observers.session_watcher import SessionWatcher
+        watcher = SessionWatcher()
+        watcher.check_all()
+        text = watcher.build_session_context()
+        return text or "No active agent session detected."
+
+    @mcp.tool()
     def get_active_workflow_prompt() -> str:
         """Get a natural language prompt describing the user's currently active workflow — what they're working on, which tools they've used, and what context has been captured. Use this to understand the user's current work thread."""
         _refresh()

@@ -1,4 +1,12 @@
-"""Natural language prompt generator — creates context preambles for AI tools."""
+"""Rules-based prompt generator — creates context preambles without an LLM.
+
+This is the fallback when no LLM provider is configured. It can't synthesize
+or infer goals, but it can structure observations clearly and let the consuming
+agent connect the dots.
+
+The key principle: lead with what's most useful to the consuming agent.
+What the user is working on > what they've been doing > what tools are active.
+"""
 
 from __future__ import annotations
 
@@ -16,433 +24,255 @@ def generate_prompt(
     tool: str = "coding",
     prompt_config: PromptConfig | None = None,
 ) -> str:
-    """
-    Generate a natural language context preamble.
+    """Generate a natural language context preamble.
 
-    Priority-ordered sections with relevance gating. Stops when approaching max_tokens.
-    1 token ~ 4 characters heuristic.
+    Builds a concise briefing from observations. Prioritizes specifics
+    (document names, topics, projects) over generic labels (activity types,
+    app names). Stops when approaching max_tokens.
     """
     if prompt_config is not None:
         max_tokens = prompt_config.max_tokens
 
     max_chars = max_tokens * 4
-    sections: list[str] = []
+    parts: list[str] = []
 
     now = model.now
     session = model.session
 
-    # Core context and duration are always relevant
-    core = _build_core(now)
+    # 1. What they're working on — the most specific description we can give
+    core = _describe_current_work(now)
     if core:
-        sections.append(core)
+        parts.append(core)
 
-    duration = _build_duration(now, session)
-    if duration and _fits(sections, duration, max_chars):
-        sections.append(duration)
+    # 2. How long / how focused
+    duration = _describe_focus(now, session)
+    if duration and _fits(parts, duration, max_chars):
+        parts.append(duration)
 
-    # Build gated optional sections
-    optional: list[tuple[str, str]] = []
+    # 3. Activity trail — connects current work to recent context
+    narrative = session.narrative()
+    if narrative and _fits(parts, narrative, max_chars):
+        parts.append(f"Earlier: {narrative}.")
 
-    research = _build_research_gated(session, prompt_config)
-    if research:
-        optional.append(("research", research))
+    # 4. Agent work — what coding agents have been building
+    agent_ctx = _describe_agent_work()
+    if agent_ctx and _fits(parts, agent_ctx, max_chars):
+        parts.append(agent_ctx)
 
-    monitors = _build_monitors_gated(now, prompt_config)
-    if monitors:
-        optional.append(("monitors", monitors))
+    # 5. Research trail
+    research = _describe_research(session, prompt_config)
+    if research and _fits(parts, research, max_chars):
+        parts.append(research)
 
-    files = _build_files_gated(session, now.file, prompt_config)
-    if files:
-        optional.append(("files", files))
+    # 6. Reference material (secondary monitors, open tabs)
+    ref = _describe_references(now, prompt_config)
+    if ref and _fits(parts, ref, max_chars):
+        parts.append(ref)
 
-    cross_session = _build_cross_session_gated(model, prompt_config)
-    if cross_session:
-        optional.append(("cross_session", cross_session))
+    # 7. Related tickets
+    ticket = _describe_tickets(now, session)
+    if ticket and _fits(parts, ticket, max_chars):
+        parts.append(ticket)
 
-    ticket = _build_ticket_gated(now, session)
-    if ticket:
-        optional.append(("ticket", ticket))
-
-    agents = _build_agents_gated(model)
-    if agents:
-        optional.append(("agents", agents))
-
-    code_changes = _build_code_changes_gated(model)
-    if code_changes:
-        optional.append(("code_changes", code_changes))
-
-    # Intent-aware reordering
-    optional = _reorder_by_intent(optional, now)
-
-    # Append what fits
-    for _label, text in optional:
-        if _fits(sections, text, max_chars):
-            sections.append(text)
-
-    return " ".join(sections)
-
-
-def _fits(existing: list[str], new: str, max_chars: int) -> bool:
-    """Check if adding new section stays within budget."""
-    current = sum(len(s) for s in existing)
-    return current + len(new) + 1 < max_chars
-
-
-def _reorder_by_intent(
-    sections: list[tuple[str, str]],
-    now,
-) -> list[tuple[str, str]]:
-    """Reorder optional sections based on current intent/activity."""
-    intent = getattr(now, "intent", None) or ""
-    activity = getattr(now, "activity", None) or ""
-
-    priority_map: dict[str, list[str]] = {
-        "researching": ["research", "code_changes", "monitors", "agents", "cross_session", "files", "ticket"],
-        "debugging": ["code_changes", "files", "ticket", "agents", "research", "monitors", "cross_session"],
-        "coding": ["code_changes", "files", "ticket", "agents", "research", "monitors", "cross_session"],
-        "writing": ["code_changes", "monitors", "research", "agents", "cross_session", "files", "ticket"],
-        "communicating": ["code_changes", "agents", "monitors", "research", "cross_session", "files", "ticket"],
-        "spreadsheet_work": ["monitors", "research", "agents", "code_changes", "files", "cross_session", "ticket"],
-        "planning": ["code_changes", "agents", "ticket", "monitors", "research", "cross_session", "files"],
-    }
-
-    # Pick priority from intent first, then activity
-    key = intent.lower() if intent else activity.lower()
-    order = priority_map.get(key)
-    if not order:
-        return sections
-
-    def sort_key(item: tuple[str, str]) -> int:
-        label = item[0]
-        try:
-            return order.index(label)
-        except ValueError:
-            return len(order)
-
-    return sorted(sections, key=sort_key)
-
-
-# ---------------------------------------------------------------------------
-# Core builders (always included)
-# ---------------------------------------------------------------------------
-
-def _build_core(now) -> str:
-    """Build the core context sentence using activity scoring."""
-    parts = []
-
-    # Use activity scoring if available
-    primary = now.get_primary_activity() if hasattr(now, "get_primary_activity") else None
-    refs = now.get_reference_activities() if hasattr(now, "get_reference_activities") else []
-
-    if primary and primary.input_seconds > 5:
-        # We know WHERE the user is actually working (keyboard input)
-        label = primary.label()
-        app = primary.app
-        activity = primary.activity
-
-        if primary.document_name:
-            sub = primary.sub_activity or ""
-            if sub == "spreadsheet":
-                parts.append(f"The user is actively working on spreadsheet \"{label}\" in {app}.")
-            elif sub == "presentation":
-                parts.append(f"The user is actively working on presentation \"{label}\" in {app}.")
-            else:
-                parts.append(f"The user is actively working on \"{label}\" in {app}.")
-        elif primary.file and primary.project:
-            parts.append(f"The user is actively {activity} in {app}, editing {primary.file} in the {primary.project} project.")
-        elif "ai_chat" in activity or "interacting" in activity:
-            parts.append(f"The user is actively typing a prompt in {app}.")
-        else:
-            parts.append(f"The user is actively {activity} in {app}.")
-
-        # Add reference context
-        if refs:
-            ref_labels = [r.label() for r in refs[:3]]
-            if len(ref_labels) == 1:
-                parts.append(f"Also has {ref_labels[0]} open for reference.")
-            else:
-                parts.append(f"Also referencing: {', '.join(ref_labels)}.")
-    else:
-        # Fall back to simple window-title based context
-        activity = now.activity or "working"
-        app = now.app or "an application"
-        doc_name = getattr(now, "document_name", None)
-
-        if doc_name:
-            sub = getattr(now, "sub_activity", None) or ""
-            if sub == "spreadsheet":
-                parts.append(f"The user is working on a spreadsheet \"{doc_name}\" in {app}.")
-            elif sub == "presentation":
-                parts.append(f"The user is working on a presentation \"{doc_name}\" in {app}.")
-            elif sub == "email_composing":
-                parts.append(f"The user is composing an email in {app}.")
-            elif sub == "email_reading":
-                parts.append(f"The user is reading email in {app}.")
-            elif sub == "email_triage":
-                parts.append(f"The user is triaging email in {app}.")
-            elif sub == "calendar":
-                parts.append(f"The user is checking their calendar in {app}.")
-            else:
-                parts.append(f"The user is working on \"{doc_name}\" in {app}.")
-        elif now.file and now.project:
-            parts.append(
-                f"The user is {activity} in {app}, editing {now.file} "
-                f"in the {now.project} project."
-            )
-        elif now.file:
-            parts.append(f"The user is {activity} in {app}, editing {now.file}.")
-        elif now.project:
-            parts.append(f"The user is {activity} in {app} on the {now.project} project.")
-        else:
-            parts.append(f"The user is {activity} in {app}.")
-
-    if now.language:
-        parts.append(f"Language: {now.language}.")
+    # 8. Active agents
+    agents = _describe_agents(model)
+    if agents and _fits(parts, agents, max_chars):
+        parts.append(agents)
 
     return " ".join(parts)
 
 
-def _build_duration(now, session) -> str | None:
-    """Build duration and focus context."""
-    if now.duration_seconds < 60:
+def _fits(existing: list[str], new: str, max_chars: int) -> bool:
+    current = sum(len(s) for s in existing)
+    return current + len(new) + 1 < max_chars
+
+
+# ---------------------------------------------------------------------------
+# Builders — each produces a natural sentence or None
+# ---------------------------------------------------------------------------
+
+def _describe_current_work(now) -> str:
+    """Describe what the user is working on, leading with specifics."""
+    primary = now.get_primary_activity() if hasattr(now, "get_primary_activity") else None
+
+    if primary and primary.input_seconds > 5:
+        return _describe_activity_record(primary)
+
+    # Fallback to snapshot fields
+    doc = getattr(now, "document_name", None)
+    sub = getattr(now, "sub_activity", None) or ""
+    topic = getattr(now, "topic", None)
+    app = now.app or "an application"
+
+    if doc:
+        if sub == "spreadsheet":
+            return f"The user is working on spreadsheet \"{doc}\" in {app}."
+        elif sub == "presentation":
+            return f"The user is working on presentation \"{doc}\" in {app}."
+        elif sub == "email_composing":
+            return "The user is composing an email."
+        elif sub == "email_reading" and topic:
+            return f"The user is reading an email about \"{topic}\"."
+        elif sub == "email_triage":
+            return "The user is going through their email."
+        elif sub == "calendar":
+            return f"The user is checking their calendar."
+        else:
+            return f"The user is working on \"{doc}\" in {app}."
+
+    if now.file and now.project:
+        activity = now.activity or "coding"
+        lang = f" ({now.language})" if now.language else ""
+        return f"The user is {activity} on {now.file} in the {now.project} project{lang}."
+
+    if now.project:
+        return f"The user is working on the {now.project} project in {app}."
+
+    if topic and sub == "email_reading":
+        return f"The user is reading an email about \"{topic}\"."
+
+    if now.activity and now.activity not in ("unknown", "idle"):
+        return f"The user is {now.activity} in {app}."
+
+    return ""
+
+
+def _describe_activity_record(rec) -> str:
+    """Describe an ActivityRecord — what the user is actively doing."""
+    app = rec.app
+    doc = rec.document_name
+    sub = rec.sub_activity or ""
+
+    if doc:
+        if sub == "spreadsheet":
+            return f"The user is actively working on spreadsheet \"{doc}\" in {app}."
+        elif sub == "presentation":
+            return f"The user is actively working on presentation \"{doc}\" in {app}."
+        else:
+            return f"The user is actively working on \"{doc}\" in {app}."
+
+    if rec.file and rec.project:
+        return f"The user is actively editing {rec.file} in the {rec.project} project ({app})."
+
+    if "ai_chat" in rec.activity or "interacting" in rec.activity:
+        return f"The user is actively typing a prompt in {app}."
+
+    return f"The user is actively {rec.activity} in {app}."
+
+
+def _describe_focus(now, session) -> str | None:
+    """How long and how focused."""
+    if now.duration_seconds < 120:
         return None
 
     minutes = int(now.duration_seconds / 60)
 
-    # Check focus blocks
-    focus_blocks = session.focus_blocks
-    if focus_blocks:
-        last_block = focus_blocks[-1]
-        block_minutes = int(last_block.duration_seconds / 60)
-        if block_minutes > 5:
-            return f"They've been in a focused session for {block_minutes} minutes."
+    if session.focus_blocks:
+        last = session.focus_blocks[-1]
+        block_min = int(last.duration_seconds / 60)
+        if block_min > 5:
+            return f"They've been focused on this for {block_min} minutes."
 
-    if minutes > 2:
-        return f"They've been on this for {minutes} minutes."
-
-    return None
+    return f"They've been at this for {minutes} minutes."
 
 
-# ---------------------------------------------------------------------------
-# Gated builders (relevance-filtered)
-# ---------------------------------------------------------------------------
-
-def _build_research_gated(session, config: PromptConfig | None) -> str | None:
-    """Build research trail — skip if stale."""
+def _describe_research(session, config) -> str | None:
+    """What they've been researching."""
     trail = session.research_trail
     if not trail:
         return None
 
-    staleness_minutes = 30
+    staleness = 30
     if config is not None:
-        staleness_minutes = config.research_staleness_minutes
+        staleness = config.research_staleness_minutes
 
-    # Check freshness of most recent entry
     recent = trail[-1]
-    ts = getattr(recent, "timestamp", None) or getattr(recent, "ts", None)
-    if ts is not None:
-        age_minutes = (time.time() - ts) / 60
-        if age_minutes > staleness_minutes:
-            return None
+    ts = getattr(recent, "ts", None)
+    if ts is not None and (time.time() - ts) / 60 > staleness:
+        return None
 
-    last_entries = trail[-3:]
-    topics = [r.topic for r in last_entries if r.topic]
+    topics = [r.topic for r in trail[-3:] if r.topic]
     if not topics:
         return None
 
-    domains = [r.domain for r in last_entries if r.domain]
-
     if len(topics) == 1:
-        source = f" on {domains[0]}" if domains else ""
-        return f"They recently researched {topics[0]}{source}."
-    else:
-        topic_str = ", ".join(topics[:-1]) + f" and {topics[-1]}"
-        return f"They recently researched {topic_str}."
+        return f"They recently looked up {topics[0]}."
+    return f"They've been researching {', '.join(topics[:-1])} and {topics[-1]}."
 
 
-def _build_monitors_gated(now, config: PromptConfig | None) -> str | None:
-    """Build multi-monitor context — skip if secondary app isn't reference material."""
+def _describe_references(now, config) -> str | None:
+    """What's open for reference alongside the main work."""
+    refs = now.get_reference_activities() if hasattr(now, "get_reference_activities") else []
+    if refs:
+        labels = [r.label() for r in refs[:3]]
+        if len(labels) == 1:
+            return f"They also have {labels[0]} open for reference."
+        return f"Also referencing: {', '.join(labels)}."
+
     if len(now.monitors) < 2:
         return None
 
-    reference_apps: list[str] = []
+    ref_apps: list[str] = []
     if config is not None:
-        reference_apps = [a.lower() for a in config.monitor_reference_apps]
+        ref_apps = [a.lower() for a in config.monitor_reference_apps]
 
-    secondary = [
-        m for m in now.monitors
-        if m.monitor_id != now.active_monitor and m.app and m.title
-    ]
-    if not secondary:
-        return None
+    for m in now.monitors:
+        if m.monitor_id != now.active_monitor and m.app and m.title:
+            if ref_apps and m.app.lower() not in ref_apps:
+                continue
+            return f"They have {m.app} showing \"{m.title}\" on another screen."
 
-    m = secondary[0]
-
-    # If config provides reference apps, filter
-    if reference_apps and m.app.lower() not in reference_apps:
-        return None
-
-    return f"They have {m.app} open on their secondary monitor showing \"{m.title}\"."
+    return None
 
 
-def _build_files_gated(session, current_file: str | None, config: PromptConfig | None) -> str | None:
-    """Build recent files context — skip if fewer than min_files edited."""
-    files = [f for f in session.files_edited if f != current_file]
-    if not files:
-        return None
-
-    min_files = 2
-    if config is not None:
-        min_files = config.min_files_for_inclusion
-
-    if len(files) < min_files:
-        return None
-
-    recent = files[-5:]
-    if len(recent) == 1:
-        return f"They also recently edited {recent[0]}."
-    else:
-        return f"Recent files: {', '.join(recent)}."
+def _describe_tickets(now, session) -> str | None:
+    """Related tickets."""
+    if now.ticket:
+        return f"Related ticket: {now.ticket}."
+    if getattr(now, "project", None) and session.tickets_worked:
+        return f"Working on: {', '.join(session.tickets_worked[-3:])}."
+    return None
 
 
-def _build_cross_session_gated(model: ContextModel, config: PromptConfig | None) -> str | None:
-    """Build cross-session context — skip if too old or no project overlap."""
-    recent = model.recent_sessions
-    if not recent:
-        return None
-
-    last = recent[-1]
-    if not last.projects:
-        return None
-
-    max_hours = 24
-    if config is not None:
-        max_hours = config.cross_session_max_hours
-
-    age_hours = (time.time() - last.end_time) / 3600
-    if age_hours > max_hours:
-        return None
-
-    # Check project overlap with current session
-    current_project = getattr(model.now, "project", None)
-    if current_project and current_project not in last.projects:
-        return None
-
-    if age_hours < 24:
-        time_str = f"{int(age_hours)} hours ago"
-    else:
-        days = int(age_hours / 24)
-        time_str = f"{days} day{'s' if days > 1 else ''} ago"
-
-    projects_str = ", ".join(last.projects[:3])
-    return f"In a previous session ({time_str}), they worked on {projects_str}."
-
-
-def _build_agents_gated(model: ContextModel) -> str | None:
-    """Build agent status summary — skip if no agents active."""
+def _describe_agents(model) -> str | None:
+    """Active AI agents."""
     agents = model.agents
     if not agents.sessions:
         return None
 
-    parts: list[str] = []
-    for session in agents.sessions.values():
-        name = _agent_display(session.tool)
-        duration_min = round(session.duration_seconds / 60)
-        state_desc = session.state.replace("_", " ")
-        proj = f" on {session.project}" if session.project else ""
-        parts.append(f"{name} {state_desc}{proj} ({duration_min} min)")
+    names = {
+        "claude_code": "Claude Code", "cursor_agent": "Cursor Agent",
+        "codex": "Codex", "chatgpt": "ChatGPT", "copilot": "Copilot",
+        "aider": "Aider", "goose": "Goose",
+    }
+
+    parts = []
+    for s in agents.sessions.values():
+        name = names.get(s.tool, s.tool)
+        mins = round(s.duration_seconds / 60)
+        proj = f" on {s.project}" if s.project else ""
+        parts.append(f"{name}{proj} ({mins} min)")
 
     if not parts:
         return None
-
     return "Active agents: " + "; ".join(parts) + "."
 
 
-def _agent_display(tool: str) -> str:
-    """Convert tool ID to display name for prompts."""
-    names = {
-        "claude_code": "Claude Code",
-        "cursor_agent": "Cursor Agent",
-        "codex": "Codex",
-        "chatgpt": "ChatGPT",
-        "copilot": "Copilot",
-        "aider": "Aider",
-        "goose": "Goose",
-        "openclaw": "OpenClaw",
-        "copilot_workspace": "Copilot Workspace",
-    }
-    return names.get(tool, tool)
-
-
-def _build_ticket_gated(now, session) -> str | None:
-    """Build ticket context — skip if no current project context."""
-    if now.ticket:
-        return f"Related ticket: {now.ticket}."
-
-    # Only include session tickets if we have project context
-    if not getattr(now, "project", None):
-        return None
-
-    tickets = session.tickets_worked
-    if tickets:
-        return f"Tickets worked on: {', '.join(tickets[-3:])}."
-    return None
-
-
-def _build_code_changes_gated(model: ContextModel) -> str | None:
-    """Build code changes context — the actual code agents wrote.
-
-    This is critical for cross-tool context: when a user switches from
-    Claude Code to ChatGPT, the prompt should show the actual code that
-    was written, not just file names or commit messages.
-    """
+def _describe_agent_work() -> str | None:
+    """Context from recent AI agent sessions."""
     try:
-        from ..store.database import fetch_recent_code_snapshots, get_connection
-        conn = get_connection()
-        try:
-            snapshots = fetch_recent_code_snapshots(conn, hours=2, limit=3)
-        finally:
-            conn.close()
+        from ..observers.session_watcher import SessionWatcher
+        watcher = SessionWatcher()
+        watcher.check_all()
+        session = watcher.get_active_session()
     except Exception:
         return None
 
-    if not snapshots:
+    if not session:
         return None
 
-    parts: list[str] = []
-    chars_remaining = 600  # budget for code context in the prompt
-
-    for snap in snapshots:
-        summary = snap.get("summary", "")
-        project = snap.get("project", "?")
-        branch = snap.get("branch", "")
-
-        if not summary:
-            # Build from file_diffs if summary is empty
-            file_diffs = snap.get("file_diffs", [])
-            if isinstance(file_diffs, list):
-                for fd in file_diffs[:5]:
-                    if isinstance(fd, dict):
-                        path = fd.get("path", "?")
-                        additions = fd.get("additions", [])
-                        if additions:
-                            code_preview = "\n".join(additions[:10])
-                            summary += f"Added to {path}:\n{code_preview}\n"
-
-        if summary:
-            header = f"Recent code in {project}"
-            if branch and branch not in ("main", "master"):
-                header += f" ({branch})"
-            chunk = f"{header}:\n{summary}"
-            if len(chunk) <= chars_remaining:
-                parts.append(chunk)
-                chars_remaining -= len(chunk)
-            else:
-                # Truncate to fit
-                parts.append(chunk[:chars_remaining])
-                break
-
-    if not parts:
+    summary = session.summary_text()
+    if not summary:
         return None
 
-    return "\n".join(parts)
+    return summary[:600]
