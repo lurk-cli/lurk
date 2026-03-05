@@ -169,7 +169,7 @@ lurk context     # what does lurk see right now?
 curl -fsSL https://raw.githubusercontent.com/zasanao/lurk/main/install.sh | bash
 ```
 
-### Reconnect AI tools
+### Connect AI tools
 
 The onboard wizard auto-detects and connects your AI tools. If you need to reconnect or add a tool later:
 
@@ -179,9 +179,22 @@ lurk connect cursor        # configure Cursor MCP integration
 lurk connect codex         # configure Codex CLI integration
 ```
 
-**HTTP API:**
+### Browser extension (ChatGPT, Claude.ai, Gemini, Copilot)
+
+For AI tools that run in the browser, lurk provides a Chrome extension that injects your context into any chat.
+
+1. Start the HTTP API: `lurk serve-http`
+2. Load the extension: Chrome → `chrome://extensions` → Enable Developer Mode → Load Unpacked → select the `extension/` folder
+3. Visit ChatGPT, Claude.ai, Gemini, or Copilot — a small lurk button appears near the chat input
+4. Click it to inject your current context into the message, or use the extension popup to copy/inject
+
+No MCP required. Works with any browser-based AI tool.
+
+### Quick copy (works everywhere)
+
 ```bash
-lurk serve-http            # start HTTP API at localhost:4141
+lurk copy                  # copy context to clipboard, paste into any AI chat
+lurk copy --watch          # keep clipboard updated every 30s
 ```
 
 **LLM-enhanced context (optional):**
@@ -207,9 +220,11 @@ lurk search <term>  Search event history
 lurk pause          Pause observation (daemon stays running)
 lurk resume         Resume observation
 
+lurk copy            Copy context to clipboard (paste into any AI chat)
+lurk copy --watch    Keep clipboard updated every 30s
 lurk connect <tool>  Connect an AI tool (claude-code, cursor, codex)
 lurk serve-mcp      Start MCP server (stdio, for Claude Code / Cursor)
-lurk serve-http     Start HTTP API at localhost:4141
+lurk serve-http     Start HTTP API at localhost:4141 (needed for extension)
 
 lurk config         Open config in $EDITOR
 lurk purge          Clean up old data per retention policy

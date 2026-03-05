@@ -33,6 +33,10 @@ package-lock.json
 *.swo
 *~
 
+# Chrome extension (not published via git)
+extension/
+*.zip
+
 # Environment
 .env
 .env.*

@@ -85,6 +85,17 @@ class ContextServer:
             self._run_simple_http()
             return
 
+        # CORS middleware for browser extension access
+        from starlette.middleware import Middleware
+        from starlette.middleware.cors import CORSMiddleware
+
+        async def status(request):
+            return JSONResponse({
+                "status": "ok",
+                "version": "0.1.0",
+                "daemon": True,
+            })
+
         async def context_now(request):
             return JSONResponse(self.model.now.to_dict())
 
@@ -122,18 +133,29 @@ class ContextServer:
         async def agents_workflow(request):
             return JSONResponse(self.model.agents.get_workflow_summary())
 
-        app = Starlette(routes=[
-            Route("/context/now", context_now),
-            Route("/context/session", context_session),
-            Route("/context/prompt", context_prompt),
-            Route("/context/project/{name:str}", context_project),
-            Route("/context", context_full),
-            Route("/agents", agents_status),
-            Route("/agents/attention", agents_attention),
-            Route("/agents/handoff", agents_handoff),
-            Route("/agents/workflow", agents_workflow),
-            Route("/", lambda r: PlainTextResponse("lurk context broker v0.1.0")),
-        ])
+        app = Starlette(
+            routes=[
+                Route("/status", status),
+                Route("/context/now", context_now),
+                Route("/context/session", context_session),
+                Route("/context/prompt", context_prompt),
+                Route("/context/project/{name:str}", context_project),
+                Route("/context", context_full),
+                Route("/agents", agents_status),
+                Route("/agents/attention", agents_attention),
+                Route("/agents/handoff", agents_handoff),
+                Route("/agents/workflow", agents_workflow),
+                Route("/", lambda r: PlainTextResponse("lurk context broker v0.1.0")),
+            ],
+            middleware=[
+                Middleware(
+                    CORSMiddleware,
+                    allow_origins=["*"],
+                    allow_methods=["GET"],
+                    allow_headers=["*"],
+                ),
+            ],
+        )
 
         logger.info("HTTP API starting at http://%s:%d", self.host, self.port)
         uvicorn.run(app, host=self.host, port=self.port, log_level="warning")
@@ -147,12 +169,24 @@ class ContextServer:
         llm_provider = self.llm_provider
 
         class Handler(BaseHTTPRequestHandler):
+            def _cors_headers(self):
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "*")
+
+            def do_OPTIONS(self):
+                self.send_response(204)
+                self._cors_headers()
+                self.end_headers()
+
             def do_GET(self):
                 parsed = urllib.parse.urlparse(self.path)
                 path = parsed.path
                 params = urllib.parse.parse_qs(parsed.query)
 
-                if path == "/context/now":
+                if path == "/status":
+                    self._json_response({"status": "ok", "version": "0.1.0", "daemon": True})
+                elif path == "/context/now":
                     self._json_response(model.now.to_dict())
                 elif path == "/context/session":
                     self._json_response(model.session.to_dict())
@@ -186,6 +220,7 @@ class ContextServer:
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
+                self._cors_headers()
                 self.end_headers()
                 self.wfile.write(body)
 
@@ -194,6 +229,7 @@ class ContextServer:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain")
                 self.send_header("Content-Length", str(len(body)))
+                self._cors_headers()
                 self.end_headers()
                 self.wfile.write(body)
 

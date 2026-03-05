@@ -792,6 +792,48 @@ def _offer_build_daemon() -> str | None:
 
 
 @app.command()
+def copy(
+    watch: bool = typer.Option(False, "--watch", "-w", help="Keep clipboard updated every 30s"),
+):
+    """Copy current context prompt to clipboard. Paste into any AI chat."""
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+    from lurk.context.model import ContextModel
+    from lurk.store.database import ensure_schema, get_connection
+    from lurk.server.prompt import generate_prompt
+    from lurk.enrichment.pipeline import EnrichmentPipeline
+
+    def _get_context() -> str:
+        conn = get_connection()
+        try:
+            ensure_schema(conn)
+            EnrichmentPipeline().run_once()
+            model = ContextModel()
+            model.load_from_db(conn)
+        finally:
+            conn.close()
+        return generate_prompt(model, max_tokens=150)
+
+    text = _get_context()
+    prompt = f"<context>\n{text}\n</context>"
+    subprocess.run(["pbcopy"], input=prompt.encode(), check=True)
+    console.print("[green]Context copied to clipboard.[/green]")
+    console.print(f"[dim]{text[:120]}{'...' if len(text) > 120 else ''}[/dim]")
+
+    if watch:
+        console.print("[dim]Watching — clipboard updates every 30s. Ctrl+C to stop.[/dim]")
+        try:
+            while True:
+                time.sleep(30)
+                text = _get_context()
+                prompt = f"<context>\n{text}\n</context>"
+                subprocess.run(["pbcopy"], input=prompt.encode(), check=True)
+                console.print(f"[dim]Updated: {text[:80]}...[/dim]")
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Stopped watching.[/yellow]")
+
+
+@app.command()
 def connect(
     tool: Optional[str] = typer.Argument(None, help="Tool to connect (claude-code, cursor, codex)"),
 ):

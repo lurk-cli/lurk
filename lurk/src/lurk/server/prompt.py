@@ -305,6 +305,9 @@ def _agent_display(tool: str) -> str:
     names = {
         "claude_code": "Claude Code",
         "cursor_agent": "Cursor Agent",
+        "codex": "Codex",
+        "chatgpt": "ChatGPT",
+        "copilot": "Copilot",
         "aider": "Aider",
         "goose": "Goose",
         "openclaw": "OpenClaw",
