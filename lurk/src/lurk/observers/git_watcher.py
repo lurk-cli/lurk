@@ -261,6 +261,36 @@ class GitWatcher:
             snaps = [s for s in snaps if s.project == project]
         return snaps[-limit:]
 
+    def check(self) -> list:
+        """WorkflowObserver protocol — returns WorkflowUpdate objects."""
+        from .base import WorkflowUpdate
+        snapshots = self.check_all()
+        updates = []
+        for snap in snapshots:
+            keywords = [snap.project]
+            if snap.branch and snap.branch not in ("main", "master"):
+                keywords.append(snap.branch)
+            for fd in snap.file_diffs[:5]:
+                stem = fd.path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+                if len(stem) > 2:
+                    keywords.append(stem)
+
+            files = [fd.path for fd in snap.file_diffs]
+            for fd in snap.file_diffs[:5]:
+                code_change = ""
+                if fd.status == "A":
+                    code_change = f"created {fd.path}"
+                elif fd.additions:
+                    code_change = f"modified {fd.path}"
+                if code_change:
+                    updates.append(WorkflowUpdate(
+                        keywords=keywords,
+                        code_change=code_change,
+                        project=snap.project,
+                        files=files,
+                    ))
+        return updates
+
     def build_change_context(self, project: str | None = None) -> str:
         """Build context showing the actual code that was written."""
         snaps = self.get_recent_snapshots(project=project, limit=5)

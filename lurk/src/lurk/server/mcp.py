@@ -214,6 +214,27 @@ def create_mcp_server():
         return text or "No active agent session detected."
 
     @mcp.tool()
+    def add_workflow_context(
+        type: str,
+        content: str,
+        workflow_id: int = 0,
+    ) -> dict[str, Any]:
+        """Feed context back into the active workflow. Use this to record decisions, findings, blockers, summaries, or open questions so that the next AI agent that picks up this workflow has the full picture.
+
+        type: One of "decision", "finding", "blocker", "summary", "question".
+        content: The actual context — e.g. "Chose JWT over session auth because the API is stateless."
+        workflow_id: Optional — if 0, uses the active workflow automatically.
+        """
+        _refresh()
+        model = _get_model()
+        wf_id = workflow_id if workflow_id > 0 else None
+        conn = get_connection()
+        try:
+            return model.workflows.add_feedback(type, content, wf_id, conn)
+        finally:
+            conn.close()
+
+    @mcp.tool()
     def get_active_workflow_prompt() -> str:
         """Get a synthesized context prompt for the active workflow. This is the key tool for understanding what the user is currently working on — it includes what they're doing, what agents have contributed, what they've researched, and what code was changed."""
         _refresh()

@@ -160,43 +160,6 @@ def _human_area(file_path: str) -> str:
     return name
 
 
-def _extract_docstring(code: str) -> str:
-    """Extract the first docstring from a code snippet."""
-    for marker in ('"""', "'''"):
-        start = code.find(marker)
-        if start == -1:
-            continue
-        end = code.find(marker, start + 3)
-        if end == -1:
-            continue
-        doc = code[start + 3:end].strip()
-        # Take first sentence only
-        if ". " in doc:
-            doc = doc[:doc.index(". ") + 1]
-        return doc[:200]
-    return ""
-
-
-def _extract_definitions(code: str) -> list[str]:
-    """Extract class and function names from a code snippet."""
-    names: list[str] = []
-    for line in code.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("class ") and "(" in stripped:
-            name = stripped[6:stripped.index("(")].strip()
-            if name and name not in names:
-                names.append(name)
-        elif stripped.startswith("def ") and "(" in stripped:
-            name = stripped[4:stripped.index("(")].strip()
-            if name and not name.startswith("_") and name not in names:
-                names.append(name)
-        elif stripped.startswith("async def ") and "(" in stripped:
-            name = stripped[10:stripped.index("(")].strip()
-            if name and not name.startswith("_") and name not in names:
-                names.append(name)
-    return names
-
-
 class SessionWatcher:
     """Watches AI agent session files for conversation context.
 
@@ -263,6 +226,31 @@ class SessionWatcher:
                 except Exception:
                     pass
         return None
+
+    def check(self) -> list:
+        """WorkflowObserver protocol — returns WorkflowUpdate objects."""
+        from .base import WorkflowUpdate
+        from ..context.workflows import _WORD_RE, _STOP_WORDS
+        updated = self.check_all()
+        results = []
+        for session in updated:
+            keywords = [session.project]
+            if session.branch and session.branch not in ("main", "master"):
+                keywords.append(session.branch)
+            for msg in session.user_messages[-3:]:
+                words = _WORD_RE.findall(msg.lower())
+                keywords.extend(w for w in words if w not in _STOP_WORDS and len(w) > 2)
+
+            summary = session.summary_text()
+            files = [e.file_path for e in session.files_edited[-5:]]
+            results.append(WorkflowUpdate(
+                keywords=keywords[:15],
+                agent_contribution=("Claude Code", summary) if summary else None,
+                project=session.project,
+                tool="Claude Code",
+                files=files,
+            ))
+        return results
 
     def build_session_context(self, session_id: str | None = None) -> str:
         """Build context from an agent session for use in prompts/workflows."""

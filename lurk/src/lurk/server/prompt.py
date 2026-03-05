@@ -59,22 +59,27 @@ def generate_prompt(
     if agent_ctx and _fits(parts, agent_ctx, max_chars):
         parts.append(agent_ctx)
 
-    # 5. Research trail
+    # 5. Workflow context — accumulated from all observers
+    wf_ctx = _describe_workflow_context(model)
+    if wf_ctx and _fits(parts, wf_ctx, max_chars):
+        parts.append(wf_ctx)
+
+    # 6. Research trail
     research = _describe_research(session, prompt_config)
     if research and _fits(parts, research, max_chars):
         parts.append(research)
 
-    # 6. Reference material (secondary monitors, open tabs)
+    # 7. Reference material (secondary monitors, open tabs)
     ref = _describe_references(now, prompt_config)
     if ref and _fits(parts, ref, max_chars):
         parts.append(ref)
 
-    # 7. Related tickets
+    # 8. Related tickets
     ticket = _describe_tickets(now, session)
     if ticket and _fits(parts, ticket, max_chars):
         parts.append(ticket)
 
-    # 8. Active agents
+    # 9. Active agents
     agents = _describe_agents(model)
     if agents and _fits(parts, agents, max_chars):
         parts.append(agents)
@@ -256,6 +261,39 @@ def _describe_agents(model) -> str | None:
     if not parts:
         return None
     return "Active agents: " + "; ".join(parts) + "."
+
+
+def _describe_workflow_context(model) -> str | None:
+    """Context from the active workflow's accumulated observations."""
+    wf = model.workflows.get_active_workflow() if hasattr(model, 'workflows') else None
+    if not wf:
+        return None
+
+    parts: list[str] = []
+
+    # Agent contributions (what each tool produced)
+    for tool, summary in wf.agent_contributions.items():
+        parts.append(f"{tool}: {summary}")
+
+    # Key decisions fed back by agents
+    if wf.key_decisions:
+        parts.append("Decisions: " + "; ".join(wf.key_decisions[-3:]) + ".")
+
+    # Code changes
+    if wf.code_changes and not wf.agent_contributions:
+        parts.append("Code changes: " + "; ".join(wf.code_changes[-3:]) + ".")
+
+    # Documents
+    if wf.documents:
+        for name, desc in list(wf.documents.items())[-2:]:
+            if desc:
+                parts.append(f'Working with "{name}" ({desc}).')
+            else:
+                parts.append(f'Working with "{name}".')
+
+    if not parts:
+        return None
+    return " ".join(parts)
 
 
 def _describe_agent_work() -> str | None:

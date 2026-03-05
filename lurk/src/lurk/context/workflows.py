@@ -76,6 +76,11 @@ class Workflow:
     tickets: list[str] = field(default_factory=list)
     key_decisions: list[str] = field(default_factory=list)
 
+    # --- Prompt memory ---
+    last_prompt: str = ""
+    last_prompt_ts: float = 0
+    prompt_version: int = 0
+
     # --- Accumulated context from observers ---
 
     # Breadcrumbs: natural language trail of what happened
@@ -178,6 +183,29 @@ class Workflow:
         if ticket and ticket not in self.tickets:
             self.tickets.append(ticket)
 
+    def add_feedback(self, feedback_type: str, content: str) -> None:
+        """Record structured feedback from an agent.
+
+        Types: decision, finding, blocker, summary, question
+        """
+        if feedback_type == "decision":
+            if content not in self.key_decisions:
+                self.key_decisions.append(content)
+                if len(self.key_decisions) > MAX_CONTRIBUTIONS:
+                    self.key_decisions = self.key_decisions[-MAX_CONTRIBUTIONS:]
+        elif feedback_type == "finding":
+            self.add_research(content)
+        elif feedback_type == "blocker":
+            self.add_breadcrumb(f"BLOCKED: {content}")
+        elif feedback_type == "summary":
+            # Overwrite the latest agent contribution with a summary
+            self.add_agent_contribution("agent_summary", content)
+        elif feedback_type == "question":
+            self.add_breadcrumb(f"Open question: {content}")
+        else:
+            self.add_breadcrumb(content)
+        self.updated_ts = time.time()
+
     # --- Context output ---
 
     def context_snapshot(self) -> dict[str, Any]:
@@ -200,7 +228,9 @@ class Workflow:
             "research": self.research[-5:],
             "code_changes": self.code_changes[-5:],
             "documents": dict(list(self.documents.items())[-5:]),
+            "key_decisions": self.key_decisions[-5:],
             "files_count": len(self.files),
+            "prompt_version": self.prompt_version,
         }
 
     def generate_prompt(self, max_chars: int = 1200) -> str:
@@ -208,6 +238,10 @@ class Workflow:
 
         This is the rules-based version. The LLM-enhanced version uses
         context_snapshot() as input and synthesizes a better prompt.
+
+        Implements prompt memory: if the new prompt is substantially similar
+        to the last one, returns the cached version. When it changes
+        meaningfully, increments the version counter.
         """
         parts: list[str] = []
 
@@ -216,6 +250,10 @@ class Workflow:
             parts.append(f"The user is working on: {self.label}.")
         if self.projects:
             parts.append(f"Project: {', '.join(self.projects[:3])}.")
+
+        # Key decisions (fed back by agents)
+        if self.key_decisions:
+            parts.append("Key decisions: " + "; ".join(self.key_decisions[-3:]) + ".")
 
         # What agents have contributed
         for tool, summary in self.agent_contributions.items():
@@ -252,8 +290,26 @@ class Workflow:
         if self.duration_seconds > 300:
             parts.append(f"Active for {self.duration_label}.")
 
-        result = " ".join(parts)
-        return result[:max_chars]
+        result = " ".join(parts)[:max_chars]
+
+        # Prompt memory: check if meaningfully different from last prompt
+        if self.last_prompt and self._prompt_similarity(result, self.last_prompt) > 0.85:
+            return self.last_prompt
+
+        # Prompt changed meaningfully — update memory
+        self.last_prompt = result
+        self.last_prompt_ts = time.time()
+        self.prompt_version += 1
+        return result
+
+    def _prompt_similarity(self, a: str, b: str) -> float:
+        """Quick word-level similarity check between two prompts."""
+        words_a = set(a.lower().split())
+        words_b = set(b.lower().split())
+        if not words_a or not words_b:
+            return 0.0
+        intersection = words_a & words_b
+        return len(intersection) / max(len(words_a), len(words_b))
 
     def to_dict(self) -> dict:
         return {
@@ -276,6 +332,8 @@ class Workflow:
             "research": self.research[-3:],
             "code_changes": self.code_changes[-3:],
             "documents": dict(list(self.documents.items())[-3:]),
+            "key_decisions": self.key_decisions[-3:],
+            "prompt_version": self.prompt_version,
         }
 
 
@@ -440,6 +498,24 @@ class WorkflowClusterer:
         wf.is_active = False
         self._save_workflow(wf, conn)
         return True
+
+    def add_feedback(self, feedback_type: str, content: str, workflow_id: int | None = None, conn=None) -> dict:
+        """Add structured feedback from an agent to a workflow.
+
+        If workflow_id is None, uses the active workflow.
+        Returns {"ok": True, "workflow_id": int} or {"error": str}.
+        """
+        if workflow_id is not None:
+            wf = self.get_workflow(workflow_id)
+        else:
+            wf = self.get_active_workflow()
+
+        if not wf:
+            return {"error": "No active workflow found. Start working on something first."}
+
+        wf.add_feedback(feedback_type, content)
+        self._save_workflow(wf, conn)
+        return {"ok": True, "workflow_id": wf.id, "type": feedback_type}
 
     def reopen_workflow(self, workflow_id: int, conn=None) -> bool:
         wf = self.get_workflow(workflow_id)

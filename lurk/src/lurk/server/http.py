@@ -183,11 +183,47 @@ class ContextServer:
         # Session watcher — reads agent conversation logs
         from ..observers.session_watcher import SessionWatcher
         self.session_watcher = SessionWatcher()
+        # Registered observers (WorkflowObserver protocol)
+        from ..observers.base import WorkflowObserver
+        self._observers: list[WorkflowObserver] = []
         # Initialize LLM provider (optional)
         llm_config = load_llm_config()
         self.llm_provider: LLMProvider | None = create_provider(llm_config)
         if self.llm_provider:
             logger.info("LLM provider: %s (%s)", self.llm_provider.name, llm_config.model)
+
+    def register_observer(self, observer) -> None:
+        """Register a WorkflowObserver to be polled in the observer loop."""
+        self._observers.append(observer)
+
+    def _apply_workflow_update(self, update, conn) -> None:
+        """Apply a WorkflowUpdate to the appropriate workflow."""
+        if not update.keywords:
+            return
+        workflow_id = self.clusterer._match_or_create(update.keywords, conn)
+        wf = self.clusterer.get_workflow(workflow_id)
+        if not wf:
+            return
+        if update.project:
+            wf.add_project(update.project)
+        if update.tool:
+            wf.add_tool(update.tool)
+        if update.breadcrumb:
+            wf.add_breadcrumb(update.breadcrumb)
+        if update.agent_contribution:
+            tool, summary = update.agent_contribution
+            wf.add_agent_contribution(tool, summary)
+        if update.code_change:
+            wf.add_code_change(update.code_change)
+        if update.research:
+            topic, source = update.research
+            wf.add_research(topic, source)
+        if update.document:
+            name, desc = update.document
+            wf.add_document(name, desc)
+        for f in update.files:
+            wf.add_file(f)
+        self.clusterer._save_workflow(wf, conn)
 
     def start(self) -> None:
         """Start the HTTP server and background enrichment."""
@@ -358,45 +394,29 @@ class ContextServer:
         logger.info("Git watcher started")
         while not self._stop_event.is_set():
             try:
-                snapshots = self.git_watcher.check_all()
-                if snapshots:
+                # Use the observer protocol to get structured updates
+                updates = self.git_watcher.check()
+                snapshots = self.git_watcher.get_recent_snapshots(limit=5)
+
+                if updates:
                     conn = get_connection()
                     try:
+                        for update in updates:
+                            self._apply_workflow_update(update, conn)
+
+                        # Also store raw snapshots to DB
                         for snap in snapshots:
-                            from ..context.workflows import _WORD_RE, _STOP_WORDS
-                            keywords = [snap.project]
-                            if snap.branch and snap.branch not in ("main", "master"):
-                                keywords.append(snap.branch)
-                            for fd in snap.file_diffs[:5]:
-                                stem = fd.path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
-                                if len(stem) > 2:
-                                    keywords.append(stem)
-
-                            workflow_id = None
-                            if keywords:
-                                workflow_id = self.clusterer._match_or_create(keywords, conn)
-                                wf = self.clusterer.get_workflow(workflow_id)
-                                if wf:
-                                    wf.add_project(snap.project)
-                                    for fd in snap.file_diffs:
-                                        wf.add_file(fd.path)
-                                    # Feed code changes as structured context
-                                    for fd in snap.file_diffs[:5]:
-                                        if fd.new_file:
-                                            wf.add_code_change(f"created {fd.path}")
-                                        elif fd.additions:
-                                            wf.add_code_change(f"modified {fd.path}")
-
-                            data = snap.to_dict()
-                            data["workflow_id"] = workflow_id
-                            insert_code_snapshot(conn, data)
-
-                            logger.info(
-                                "Code snapshot: %s %s (+%d/-%d) %d files [wf:%s]",
-                                snap.project, snap.change_type,
-                                snap.total_additions, snap.total_deletions,
-                                len(snap.file_diffs), workflow_id,
-                            )
+                            if snap.timestamp > time.time() - 15:  # only recent
+                                data = snap.to_dict()
+                                wf = self.clusterer.get_active_workflow()
+                                data["workflow_id"] = wf.id if wf else None
+                                insert_code_snapshot(conn, data)
+                                logger.info(
+                                    "Code snapshot: %s %s (+%d/-%d) %d files",
+                                    snap.project, snap.change_type,
+                                    snap.total_additions, snap.total_deletions,
+                                    len(snap.file_diffs),
+                                )
                     finally:
                         conn.close()
             except Exception:
@@ -408,38 +428,18 @@ class ContextServer:
         logger.info("Session watcher started")
         while not self._stop_event.is_set():
             try:
-                updated = self.session_watcher.check_all()
-                if updated:
+                # Use the observer protocol to get structured updates
+                updates = self.session_watcher.check()
+                if updates:
                     conn = get_connection()
                     try:
-                        for session in updated:
-                            from ..context.workflows import _WORD_RE, _STOP_WORDS
-                            keywords = [session.project]
-                            if session.branch and session.branch not in ("main", "master"):
-                                keywords.append(session.branch)
-                            for msg in session.user_messages[-3:]:
-                                words = _WORD_RE.findall(msg.lower())
-                                keywords.extend(w for w in words if w not in _STOP_WORDS and len(w) > 2)
-
-                            if keywords:
-                                workflow_id = self.clusterer._match_or_create(keywords[:15], conn)
-                                wf = self.clusterer.get_workflow(workflow_id)
-                                if wf:
-                                    wf.add_project(session.project)
-                                    wf.add_tool("Claude Code")
-                                    for fe in session.files_edited[-5:]:
-                                        wf.add_file(fe.file_path)
-                                    # Feed agent summary as structured contribution
-                                    summary = session.summary_text()
-                                    if summary:
-                                        wf.add_agent_contribution("Claude Code", summary)
-
-                            logger.info(
-                                "Session update: %s (%s) — %d msgs, %d edits, %d tool calls",
-                                session.project, session.session_id[:8],
-                                len(session.user_messages), session.total_edits,
-                                session.total_tool_calls,
-                            )
+                        for update in updates:
+                            self._apply_workflow_update(update, conn)
+                            if update.project:
+                                logger.info(
+                                    "Session update: %s (%s)",
+                                    update.project, update.tool or "unknown",
+                                )
                     finally:
                         conn.close()
             except Exception:
@@ -465,7 +465,7 @@ class ContextServer:
         async def status(request):
             return JSONResponse({
                 "status": "ok",
-                "version": "0.1.0",
+                "version": "0.2.0",
                 "daemon": True,
             })
 
@@ -530,6 +530,27 @@ class ContextServer:
                 return JSONResponse(result)
             except Exception as e:
                 logger.warning("Capture error: %s", e)
+                return JSONResponse({"error": str(e)}, status_code=400)
+
+        async def context_feedback(request):
+            """Receive feedback from agents — decisions, findings, blockers, etc."""
+            try:
+                body = await request.json()
+                feedback_type = body.get("type", "")
+                content = body.get("content", "")
+                workflow_id = body.get("workflow_id")
+                if not content:
+                    return JSONResponse({"error": "Missing 'content' field"}, status_code=400)
+                if feedback_type not in ("decision", "finding", "blocker", "summary", "question"):
+                    feedback_type = "finding"
+                conn = get_connection()
+                try:
+                    result = self.clusterer.add_feedback(feedback_type, content, workflow_id, conn)
+                finally:
+                    conn.close()
+                return JSONResponse(result)
+            except Exception as e:
+                logger.warning("Feedback error: %s", e)
                 return JSONResponse({"error": str(e)}, status_code=400)
 
         async def workflow_prompt(request):
@@ -601,6 +622,7 @@ class ContextServer:
                 Route("/context/project/{name:str}", context_project),
                 Route("/context/enrich", context_enrich, methods=["POST"]),
                 Route("/context/capture", context_capture, methods=["POST"]),
+                Route("/context/feedback", context_feedback, methods=["POST"]),
                 Route("/context/workflow-prompt", workflow_prompt),
                 Route("/workflows", workflows_list),
                 Route("/sessions", agent_sessions),
@@ -653,7 +675,7 @@ class ContextServer:
                 params = urllib.parse.parse_qs(parsed.query)
 
                 if path == "/status":
-                    self._json_response({"status": "ok", "version": "0.1.0", "daemon": True})
+                    self._json_response({"status": "ok", "version": "0.2.0", "daemon": True})
                 elif path == "/context/now":
                     self._json_response(model.now.to_dict())
                 elif path == "/context/session":
@@ -742,6 +764,21 @@ class ContextServer:
                 elif path == "/context/capture":
                     result = server_self._process_capture(body)
                     self._json_response(result)
+                elif path == "/context/feedback":
+                    feedback_type = body.get("type", "finding")
+                    content = body.get("content", "")
+                    workflow_id = body.get("workflow_id")
+                    if not content:
+                        self._json_response({"error": "Missing 'content' field"})
+                    else:
+                        if feedback_type not in ("decision", "finding", "blocker", "summary", "question"):
+                            feedback_type = "finding"
+                        c = get_connection()
+                        try:
+                            result = server_self.clusterer.add_feedback(feedback_type, content, workflow_id, c)
+                        finally:
+                            c.close()
+                        self._json_response(result)
                 else:
                     self.send_error(404)
 

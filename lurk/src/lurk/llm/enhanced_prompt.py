@@ -161,6 +161,34 @@ def _build_context_data(model: ContextModel) -> str:
     if agent_context:
         sections.append(f"RECENT AGENT WORK:\n{agent_context}")
 
+    # --- Workflow context (accumulated from all observers) ---
+    wf = model.workflows.get_active_workflow() if hasattr(model, 'workflows') else None
+    if wf:
+        wf_parts = []
+        if wf.label:
+            wf_parts.append(f"Workflow: {wf.label}")
+        if wf.agent_contributions:
+            for tool, summary in wf.agent_contributions.items():
+                wf_parts.append(f"{tool}: {summary}")
+        if wf.breadcrumbs:
+            recent = wf.breadcrumbs[-6:]
+            trail = list(dict.fromkeys(recent))
+            wf_parts.append("Trail: " + " → ".join(trail))
+        if wf.research:
+            topics = [r["topic"] for r in wf.research[-3:]]
+            wf_parts.append(f"Researched: {', '.join(topics)}")
+        if wf.code_changes:
+            wf_parts.append("Code changes: " + "; ".join(wf.code_changes[-5:]))
+        if wf.documents:
+            doc_items = [f'"{n}"' + (f" ({d})" if d else "") for n, d in list(wf.documents.items())[-3:]]
+            wf_parts.append(f"Documents: {', '.join(doc_items)}")
+        if wf.key_decisions:
+            wf_parts.append("Decisions: " + "; ".join(wf.key_decisions[-3:]))
+        if wf.projects:
+            wf_parts.append(f"Projects: {', '.join(wf.projects[:3])}")
+        if wf_parts:
+            sections.append("WORKFLOW CONTEXT:\n" + "\n".join(wf_parts))
+
     # --- Cross-session continuity ---
     if model.recent_sessions:
         last = model.recent_sessions[-1]
