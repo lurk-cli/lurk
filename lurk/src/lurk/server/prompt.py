@@ -54,32 +54,37 @@ def generate_prompt(
     if narrative and _fits(parts, narrative, max_chars):
         parts.append(f"Earlier: {narrative}.")
 
-    # 4. Agent work — what coding agents have been building
+    # 4. Screen content — what's actually visible (regex-extracted fallback)
+    screen_ctx = _describe_screen_content()
+    if screen_ctx and _fits(parts, screen_ctx, max_chars):
+        parts.append(screen_ctx)
+
+    # 5. Agent work — what coding agents have been building
     agent_ctx = _describe_agent_work()
     if agent_ctx and _fits(parts, agent_ctx, max_chars):
         parts.append(agent_ctx)
 
-    # 5. Workflow context — accumulated from all observers
+    # 6. Workflow context — accumulated from all observers
     wf_ctx = _describe_workflow_context(model)
     if wf_ctx and _fits(parts, wf_ctx, max_chars):
         parts.append(wf_ctx)
 
-    # 6. Research trail
+    # 7. Research trail
     research = _describe_research(session, prompt_config)
     if research and _fits(parts, research, max_chars):
         parts.append(research)
 
-    # 7. Reference material (secondary monitors, open tabs)
+    # 8. Reference material (secondary monitors, open tabs)
     ref = _describe_references(now, prompt_config)
     if ref and _fits(parts, ref, max_chars):
         parts.append(ref)
 
-    # 8. Related tickets
+    # 9. Related tickets
     ticket = _describe_tickets(now, session)
     if ticket and _fits(parts, ticket, max_chars):
         parts.append(ticket)
 
-    # 9. Active agents
+    # 10. Active agents
     agents = _describe_agents(model)
     if agents and _fits(parts, agents, max_chars):
         parts.append(agents)
@@ -261,6 +266,34 @@ def _describe_agents(model) -> str | None:
     if not parts:
         return None
     return "Active agents: " + "; ".join(parts) + "."
+
+
+def _describe_screen_content() -> str | None:
+    """Describe what's visible on screen from regex-extracted OCR.
+
+    This is the rules-based fallback. When an LLM is configured,
+    enhanced_prompt.py feeds raw screen text directly instead.
+    """
+    try:
+        from ..observers.screenshot_observer import ScreenshotObserver
+        observer = ScreenshotObserver()
+        ctx = observer.get_latest_context()
+        if not ctx:
+            return None
+
+        parts = []
+        if ctx.get("agent_tool"):
+            parts.append(f"Screen shows an active {ctx['agent_tool']} session.")
+        if ctx.get("errors"):
+            parts.append(f"Visible error: {ctx['errors'][0][:80]}.")
+        if ctx.get("terminal_commands"):
+            parts.append(f"Recent command: {ctx['terminal_commands'][-1][:60]}.")
+        if ctx.get("files") and not parts:
+            parts.append(f"Visible files: {', '.join(ctx['files'][:3])}.")
+
+        return " ".join(parts) if parts else None
+    except Exception:
+        return None
 
 
 def _describe_workflow_context(model) -> str | None:

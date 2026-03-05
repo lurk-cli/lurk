@@ -16,7 +16,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/zasanao/lurk.git"
+    "url": "git+https://github.com/lurk-cli/lurk.git"
   },
   "keywords": [
     "context",
@@ -33,9 +33,9 @@
   "author": "zasanao",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/zasanao/lurk/issues"
+    "url": "https://github.com/lurk-cli/lurk/issues"
   },
-  "homepage": "https://github.com/zasanao/lurk#readme",
+  "homepage": "https://github.com/lurk-cli/lurk#readme",
   "engines": {
     "node": ">=24"
   },

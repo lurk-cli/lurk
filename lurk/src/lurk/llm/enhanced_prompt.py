@@ -1,13 +1,16 @@
-"""LLM-enhanced prompt generation — produces context that makes agents perform better.
+"""Context prompt generation — raw screen content for consuming agents.
 
-Working backwards from what Anthropic recommends for effective agent prompts:
-the consuming agent needs to understand the user's GOAL, not their app. It needs
-RELEVANT STATE, not an activity log. It needs GROUNDING specifics (names, projects,
-artifacts), not abstract descriptions. And it needs MINIMAL, HIGH-SIGNAL tokens —
-every word should earn its place.
+The consuming agent (Claude Code, Cursor, ChatGPT) IS an LLM. It doesn't
+need us to pre-digest the screen content through another LLM call. That's
+an extra cost, an extra latency hit, and a lossy transformation.
 
-The LLM synthesizes raw observations into this. The rules-based fallback does
-its best without synthesis.
+Instead: capture the screen via OCR, format it with minimal metadata, and
+hand it directly to the consuming agent. Let IT read the code, the errors,
+the browser content, and figure out what the user is doing.
+
+If an LLM provider IS configured (Ollama, API key), it can optionally
+synthesize a shorter summary. But the default path — which costs nothing
+and requires no configuration — is raw screen text + metadata.
 """
 
 from __future__ import annotations
@@ -24,36 +27,21 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("lurk.llm")
 
-# This system prompt is the most important part of lurk's output quality.
-# It tells the LLM how to turn raw observations into context that makes
-# the consuming agent perform better.
+# System prompt only used when an LLM provider is explicitly configured.
+# Most users won't hit this path.
 SYSTEM_PROMPT = """\
 You are generating context for an AI agent's system prompt. Your output will be \
 injected so the agent understands what the user is working on without being told.
 
-Your job: synthesize raw observations into a brief, useful context preamble that \
-helps the agent be immediately helpful.
+You will receive raw text captured from the user's screen (via OCR). This is \
+exactly what they're looking at right now. Synthesize it into 2-4 sentences:
 
-What makes good context for an agent:
-1. GOAL — What is the user trying to accomplish? Infer from their activity trail. \
-Not "they're in Excel" but "they're analyzing Q3 revenue data."
-2. STATE — Where are they in the task? What's done, what's in progress? \
-Not "they edited 5 files" but "they've built the data model and are now wiring up the API."
-3. GROUNDING — Specific names, projects, documents, topics that let the agent \
-give concrete answers. Not "a spreadsheet" but "the Q3 Revenue Forecast spreadsheet."
-4. CONNECTIONS — How do recent activities relate? If they read an email about \
-Project Alpha then opened a spreadsheet, say so. Don't list disconnected facts.
+1. GOAL — What is the user trying to accomplish?
+2. STATE — Where are they in the task? What's stuck?
+3. GROUNDING — Specific names, functions, files, error messages.
+4. CONNECTIONS — How do multiple screens relate?
 
-Rules:
-- Write 2-4 sentences of natural prose. No bullet points, no labels, no formatting.
-- Synthesize, don't list. Connect the dots between activities.
-- Be specific — use actual names, titles, and topics from the data.
-- Infer the goal from the activity pattern. Research + spreadsheet + email = preparing something.
-- Write in present tense, as if briefing a colleague about what someone is doing right now.
-- Do NOT mention the observation system, context system, or any meta-commentary.
-- Do NOT speculate beyond what the data supports. If you can't infer the goal, \
-describe the current activity with specifics.
-- Stay within the token budget. Every word should help the consuming agent."""
+Write natural prose. Be specific. Do NOT mention screenshots or OCR."""
 
 
 def generate_enhanced_prompt(
@@ -63,189 +51,103 @@ def generate_enhanced_prompt(
     tool: str = "coding",
     prompt_config: PromptConfig | None = None,
 ) -> str:
-    """Generate a context preamble, using LLM if available.
+    """Generate a context prompt for a consuming agent.
 
-    Always returns a valid prompt — falls back to rules-based if LLM fails.
+    Default path (no LLM, no cost): raw screen text + metadata.
+    Optional path (LLM configured): synthesized summary.
+    Fallback: rules-based prompt from categorical labels.
     """
-    # Always generate rules-based as fallback
-    fallback = rules_based_prompt(model, max_tokens, tool, prompt_config=prompt_config)
+    # Try raw screen text first — this is the best signal and costs nothing
+    screen_prompt = _build_screen_prompt(model)
+    if screen_prompt:
+        # If an LLM is configured, optionally synthesize a shorter version
+        if provider is not None:
+            synthesized = _try_llm_synthesis(provider, screen_prompt, max_tokens, tool)
+            if synthesized:
+                return synthesized
+        # Otherwise return the screen text directly — the consuming agent IS an LLM
+        return screen_prompt
 
-    if provider is None:
-        return fallback
-
-    try:
-        context_data = _build_context_data(model)
-        if not context_data:
-            return fallback
-
-        user_prompt = (
-            f"Synthesize this into a {max_tokens}-token context preamble for a "
-            f"{tool} AI tool. Focus on the user's goal and current state, not "
-            f"raw observations:\n\n{context_data}"
-        )
-
-        response = provider.generate(user_prompt, system=SYSTEM_PROMPT, max_tokens=max_tokens)
-
-        if response and response.text:
-            logger.debug("LLM-enhanced prompt generated (%d tokens)", response.tokens_used)
-            return response.text
-        else:
-            return fallback
-
-    except Exception:
-        logger.debug("LLM prompt generation failed, using rules-based fallback")
-        return fallback
+    # No screen text available — fall back to rules-based prompt
+    return rules_based_prompt(model, max_tokens, tool, prompt_config=prompt_config)
 
 
-def _build_context_data(model: ContextModel) -> str:
-    """Build the observation data that the LLM will synthesize.
+def _build_screen_prompt(model: ContextModel) -> str | None:
+    """Build a context prompt from raw screen captures + metadata.
 
-    Organized by signal value, not by source. The LLM's job is to connect
-    these into a coherent picture of what the user is doing and why.
+    No LLM call. No API key. No cost. The raw screen text IS the context.
+    The consuming agent is an LLM — let it interpret what's on screen.
     """
+    parts = []
+
+    # Primary signal: what's on screen right now
+    screen_text = _get_raw_screen_text()
+    if not screen_text:
+        return None
+
+    parts.append(screen_text)
+
+    # Supplementary: metadata not visible in OCR
     now = model.now
-    session = model.session
-    sections = []
-
-    # --- What they're doing right now ---
-    current = []
-    if now.app:
-        current.append(f"Currently in: {now.app}")
-    if now.document_name:
-        current.append(f"Document: \"{now.document_name}\"")
-    if now.file and now.project:
-        current.append(f"Editing: {now.file} in {now.project}")
-    elif now.file:
-        current.append(f"Editing: {now.file}")
+    meta = []
+    if now.project and now.branch:
+        meta.append(f"Project: {now.project} (branch: {now.branch})")
     elif now.project:
-        current.append(f"Project: {now.project}")
-    if now.activity and now.activity not in ("unknown", "idle"):
-        current.append(f"Activity: {now.activity}")
-    if now.sub_activity:
-        current.append(f"Specifically: {now.sub_activity}")
-    if now.language:
-        current.append(f"Language: {now.language}")
-    if now.ticket:
-        current.append(f"Ticket: {now.ticket}")
-    if now.branch:
-        current.append(f"Branch: {now.branch}")
+        meta.append(f"Project: {now.project}")
     if now.duration_seconds > 120:
-        current.append(f"Been at this: {int(now.duration_seconds / 60)} minutes")
-    if current:
-        sections.append("CURRENT:\n" + "\n".join(current))
+        meta.append(f"Active for {int(now.duration_seconds / 60)} minutes")
 
-    # --- What they've been doing (the trail that reveals intent) ---
+    # Activity trail — what they did before the current screen
+    session = model.session
     narrative = session.narrative()
     if narrative:
-        sections.append(f"ACTIVITY TRAIL:\n{narrative}")
+        meta.append(f"Earlier: {narrative}")
 
-    # --- Reference material (what's open alongside) ---
-    refs = now.get_reference_activities() if hasattr(now, "get_reference_activities") else []
-    if refs:
-        ref_lines = [f"- {r.label()} in {r.app}" for r in refs[:3]]
-        sections.append("ALSO OPEN FOR REFERENCE:\n" + "\n".join(ref_lines))
-    elif len(now.monitors) > 1:
-        for m in now.monitors:
-            if m.monitor_id != now.active_monitor and m.app and m.title:
-                sections.append(f"SECONDARY MONITOR: {m.app} showing \"{m.title}\"")
-                break
-
-    # --- Research (what they've been looking up) ---
-    if session.research_trail:
-        topics = [r.topic for r in session.research_trail[-5:] if r.topic]
-        if topics:
-            sections.append(f"RECENTLY RESEARCHED: {', '.join(topics)}")
-
-    # --- Agent work product (code changes, session context) ---
-    agent_context = _get_agent_context()
-    if agent_context:
-        sections.append(f"RECENT AGENT WORK:\n{agent_context}")
-
-    # --- Workflow context (accumulated from all observers) ---
+    # Workflow decisions — what's been decided so far
     wf = model.workflows.get_active_workflow() if hasattr(model, 'workflows') else None
-    if wf:
-        wf_parts = []
-        if wf.label:
-            wf_parts.append(f"Workflow: {wf.label}")
-        if wf.agent_contributions:
-            for tool, summary in wf.agent_contributions.items():
-                wf_parts.append(f"{tool}: {summary}")
-        if wf.breadcrumbs:
-            recent = wf.breadcrumbs[-6:]
-            trail = list(dict.fromkeys(recent))
-            wf_parts.append("Trail: " + " → ".join(trail))
-        if wf.research:
-            topics = [r["topic"] for r in wf.research[-3:]]
-            wf_parts.append(f"Researched: {', '.join(topics)}")
-        if wf.code_changes:
-            wf_parts.append("Code changes: " + "; ".join(wf.code_changes[-5:]))
-        if wf.documents:
-            doc_items = [f'"{n}"' + (f" ({d})" if d else "") for n, d in list(wf.documents.items())[-3:]]
-            wf_parts.append(f"Documents: {', '.join(doc_items)}")
-        if wf.key_decisions:
-            wf_parts.append("Decisions: " + "; ".join(wf.key_decisions[-3:]))
-        if wf.projects:
-            wf_parts.append(f"Projects: {', '.join(wf.projects[:3])}")
-        if wf_parts:
-            sections.append("WORKFLOW CONTEXT:\n" + "\n".join(wf_parts))
+    if wf and wf.key_decisions:
+        meta.append("Decisions: " + "; ".join(wf.key_decisions[-3:]))
+    if wf and wf.agent_contributions:
+        for agent_tool, summary in wf.agent_contributions.items():
+            meta.append(f"{agent_tool}: {summary}")
 
-    # --- Screen content (OCR from latest screenshot) ---
-    screen_ctx = _get_screen_context()
-    if screen_ctx:
-        sections.append(f"SCREEN CONTENT:\n{screen_ctx}")
+    if meta:
+        parts.append("\n".join(meta))
 
-    # --- Cross-session continuity ---
-    if model.recent_sessions:
-        last = model.recent_sessions[-1]
-        if last.projects:
-            import time
-            age_hours = (time.time() - last.end_time) / 3600
-            if age_hours < 24:
-                sections.append(
-                    f"EARLIER TODAY: worked on {', '.join(last.projects[:3])}"
-                )
-
-    return "\n\n".join(sections)
+    return "\n\n".join(parts)
 
 
-def _get_screen_context() -> str | None:
-    """Get context from the latest screenshot OCR analysis."""
+def _get_raw_screen_text() -> str | None:
+    """Get formatted raw screen content from the buffer."""
     try:
-        from ..observers.screenshot_observer import ScreenshotObserver
-        observer = ScreenshotObserver()
-        ctx = observer.get_latest_context()
-        if not ctx:
-            return None
-        parts = []
-        if ctx.get("summary"):
-            parts.append(ctx["summary"])
-        if ctx.get("activity"):
-            parts.append(f"Activity: {ctx['activity']}")
-        if ctx.get("agent_tool"):
-            parts.append(f"Agent: {ctx['agent_tool']}")
-        if ctx.get("files"):
-            parts.append(f"Files visible: {', '.join(ctx['files'][:5])}")
-        if ctx.get("terminal_commands"):
-            parts.append(f"Recent commands: {'; '.join(ctx['terminal_commands'][-3:])}")
-        if ctx.get("errors"):
-            parts.append(f"Errors: {'; '.join(ctx['errors'][:2])}")
-        if ctx.get("text_preview") and not parts:
-            # Fall back to raw text if no structured signals
-            parts.append(ctx["text_preview"][:200])
-        return "\n".join(parts) if parts else None
+        from ..observers.screenshot_observer import get_screen_buffer
+        buf = get_screen_buffer()
+        text = buf.format_for_llm(max_chars=3000)
+        return text if text else None
     except Exception:
         return None
 
 
-def _get_agent_context() -> str | None:
-    """Get context from recent AI agent sessions."""
+def _try_llm_synthesis(
+    provider: LLMProvider,
+    screen_prompt: str,
+    max_tokens: int,
+    tool: str,
+) -> str | None:
+    """Optionally synthesize a shorter prompt via LLM.
+
+    Only called when a provider is explicitly configured. Most users
+    skip this entirely and serve raw screen text directly.
+    """
     try:
-        from ..observers.session_watcher import SessionWatcher
-        watcher = SessionWatcher()
-        watcher.check_all()
-        session = watcher.get_active_session()
-        if session:
-            return session.summary_text()
+        user_prompt = (
+            f"Synthesize this into a {max_tokens}-token context preamble for a "
+            f"{tool} AI tool:\n\n{screen_prompt}"
+        )
+        response = provider.generate(user_prompt, system=SYSTEM_PROMPT, max_tokens=max_tokens)
+        if response and response.text:
+            logger.debug("LLM synthesis: %d tokens", response.tokens_used)
+            return response.text
     except Exception:
-        pass
+        logger.debug("LLM synthesis failed, serving raw screen text")
     return None

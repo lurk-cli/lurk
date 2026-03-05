@@ -527,7 +527,7 @@ class ContextServer:
             return JSONResponse(self.model.session.to_dict())
 
         async def context_prompt(request):
-            max_tokens = int(request.query_params.get("max_tokens", 250))
+            max_tokens = int(request.query_params.get("max_tokens", 500))
             tool = request.query_params.get("for", "coding")
             ext_ctx = self.get_extension_context()
             text = generate_enhanced_prompt(self.model, self.llm_provider, max_tokens=max_tokens, tool=tool)
@@ -732,7 +732,7 @@ class ContextServer:
                 elif path == "/context/session":
                     self._json_response(model.session.to_dict())
                 elif path == "/context/prompt":
-                    max_tokens = int(params.get("max_tokens", [250])[0])
+                    max_tokens = int(params.get("max_tokens", [500])[0])
                     tool = params.get("for", ["coding"])[0]
                     text = generate_enhanced_prompt(model, llm_provider, max_tokens=max_tokens, tool=tool)
                     ext_ctx = server_self.get_extension_context()

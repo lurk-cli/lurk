@@ -3,7 +3,7 @@ set -e
 
 # lurk installer — one command to set up the context broker for AI tools
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/zasanao/lurk/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/lurk-cli/lurk/main/install.sh | bash
 #   ./install.sh  (from repo root)
 
 LURK_DIR="$HOME/.lurk"

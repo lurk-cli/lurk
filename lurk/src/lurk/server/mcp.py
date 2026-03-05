@@ -97,21 +97,11 @@ def create_mcp_server():
         return _get_model().session.to_dict()
 
     @mcp.tool()
-    def get_context_prompt(max_tokens: int = 250) -> str:
-        """Natural language context preamble describing what the user is currently working on. Inject this into your system prompt for context-aware responses. Draws from the active workflow's accumulated context when available."""
+    def get_context_prompt(max_tokens: int = 500) -> str:
+        """What the user is working on right now — raw screen content, project metadata, and activity trail. This is captured from their actual screen via OCR. Inject into your system prompt for context-aware responses."""
         _refresh()
         model = _get_model()
-
-        # If there's an active workflow with accumulated context, blend it in
-        wf = model.workflows.get_active_workflow()
-        prompt = generate_enhanced_prompt(model, _llm_provider, max_tokens=max_tokens)
-
-        if wf and (wf.breadcrumbs or wf.agent_contributions or wf.research):
-            wf_prompt = wf.generate_prompt(max_chars=400)
-            if wf_prompt and len(prompt) + len(wf_prompt) < max_tokens * 4:
-                prompt = prompt + " " + wf_prompt
-
-        return prompt[:max_tokens * 4]
+        return generate_enhanced_prompt(model, _llm_provider, max_tokens=max_tokens)
 
     @mcp.tool()
     def get_project_context(project_name: str = "") -> dict[str, Any]:

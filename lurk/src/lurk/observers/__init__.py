@@ -1,4 +1,4 @@
 from .base import WorkflowObserver, WorkflowUpdate
-from .screenshot_observer import ScreenshotObserver
+from .screenshot_observer import ScreenshotObserver, ScreenBuffer, get_screen_buffer
 
-__all__ = ["WorkflowObserver", "WorkflowUpdate", "ScreenshotObserver"]
+__all__ = ["WorkflowObserver", "WorkflowUpdate", "ScreenshotObserver", "ScreenBuffer", "get_screen_buffer"]
