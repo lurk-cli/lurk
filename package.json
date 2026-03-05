@@ -1,5 +1,5 @@
 {
-  "name": "lurk",
+  "name": "lurk-cli",
   "version": "0.1.0",
   "description": "Context broker for AI tools — lurk sees everything on your screen and gives every AI agent the full picture",
   "bin": {

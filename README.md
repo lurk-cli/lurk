@@ -148,7 +148,7 @@ Agent states are inferred from title changes over time — a burst of rapid file
 **Requirements:** macOS 13+
 
 ```bash
-npm install -g lurk@latest
+npm install -g lurk-cli@latest
 
 lurk onboard --install-daemon
 ```
