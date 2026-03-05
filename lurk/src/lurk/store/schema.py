@@ -69,3 +69,91 @@ CREATE TABLE IF NOT EXISTS sessions (
 SESSIONS_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_sessions_start ON sessions(start_ts)",
 ]
+
+# Knowledge trail — viewport captures, typing, page content
+CAPTURES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS captures (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    source TEXT NOT NULL,
+    capture_type TEXT NOT NULL,
+    app TEXT,
+    hostname TEXT,
+    url TEXT,
+    page_title TEXT,
+    headers TEXT,
+    meta TEXT,
+    viewport_text TEXT,
+    page_content TEXT,
+    typing_text TEXT,
+    dwell_seconds REAL DEFAULT 0,
+    scroll_depth INTEGER DEFAULT 0,
+    engagement_score REAL DEFAULT 0,
+    topics TEXT,
+    workflow_id INTEGER,
+    summary TEXT
+)
+"""
+
+CAPTURES_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_captures_ts ON captures(ts)",
+    "CREATE INDEX IF NOT EXISTS idx_captures_workflow ON captures(workflow_id)",
+]
+
+# FTS index for full-text search across captures
+CAPTURES_FTS = """
+CREATE VIRTUAL TABLE IF NOT EXISTS captures_fts USING fts5(
+    page_title,
+    headers,
+    viewport_text,
+    page_content,
+    typing_text,
+    topics,
+    summary,
+    content=captures,
+    content_rowid=id
+)
+"""
+
+# Workflow clusters — groups of related captures
+WORKFLOWS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS workflows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_ts REAL NOT NULL,
+    updated_ts REAL NOT NULL,
+    topic_keywords TEXT NOT NULL,
+    label TEXT,
+    capture_count INTEGER DEFAULT 0,
+    is_active INTEGER DEFAULT 1
+)
+"""
+
+WORKFLOWS_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_workflows_active ON workflows(is_active, updated_ts)",
+]
+
+# Code snapshots — the actual code that coding agents write
+CODE_SNAPSHOTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS code_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    project TEXT NOT NULL,
+    repo_path TEXT,
+    branch TEXT,
+    change_type TEXT NOT NULL,
+    commit_hash TEXT,
+    files_touched TEXT,
+    file_diffs TEXT,
+    full_diff TEXT,
+    summary TEXT,
+    total_additions INTEGER DEFAULT 0,
+    total_deletions INTEGER DEFAULT 0,
+    workflow_id INTEGER
+)
+"""
+
+CODE_SNAPSHOTS_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_code_snapshots_ts ON code_snapshots(ts)",
+    "CREATE INDEX IF NOT EXISTS idx_code_snapshots_project ON code_snapshots(project)",
+    "CREATE INDEX IF NOT EXISTS idx_code_snapshots_workflow ON code_snapshots(workflow_id)",
+]

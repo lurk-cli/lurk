@@ -11,6 +11,7 @@ from .agents import AgentRegistry
 from .project import ProjectGraph
 from .session import CompactSession, SessionTracker
 from .snapshot import CurrentSnapshot, MonitorState
+from .workflows import WorkflowClusterer
 
 logger = logging.getLogger("lurk.context")
 
@@ -28,6 +29,7 @@ class ContextModel:
         self.session_tracker = SessionTracker()
         self.projects = ProjectGraph()
         self.agents = AgentRegistry(stale_timeout=stale_timeout)
+        self.workflows = WorkflowClusterer()
 
     @property
     def session(self):
@@ -43,6 +45,7 @@ class ContextModel:
         self.session_tracker.process_event(event)
         self.projects.update(event)
         self.agents.process_event(event)
+        self.workflows.process_enriched_event(event)
 
     def process_raw_event(self, event: dict[str, Any]) -> None:
         """Process a raw event for input state and monitor updates."""
@@ -85,6 +88,9 @@ class ContextModel:
         except Exception:
             logger.debug("No saved sessions found (table may not exist yet)")
 
+        # Load workflows
+        self.workflows.load_from_db(conn)
+
         # Load recent enriched events
         events = fetch_recent_enriched(conn, hours=24, limit=200)
         for event in reversed(events):
@@ -125,4 +131,5 @@ class ContextModel:
             "recent_sessions": [s.to_dict() for s in self.recent_sessions[-5:]],
             "projects": self.projects.to_dict(),
             "agents": self.agents.to_dict(),
+            "workflows": [wf.to_dict() for wf in self.workflows.list_workflows()],
         }

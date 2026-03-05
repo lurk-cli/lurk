@@ -19,6 +19,150 @@ from ..store.database import ensure_schema, get_connection
 logger = logging.getLogger("lurk.http")
 
 
+def _build_page_context_summary(ext_ctx: dict) -> str:
+    """Build a natural language summary from extension-captured page context."""
+    parts: list[str] = []
+    doc_type = ext_ctx.get("type", "")
+    doc_name = ext_ctx.get("document_name", "")
+
+    if doc_type == "document":
+        if ext_ctx.get("current_section"):
+            parts.append(f"Currently in the section \"{ext_ctx['current_section']}\".")
+        if ext_ctx.get("selection"):
+            sel = ext_ctx["selection"]
+            if len(sel) > 100:
+                sel = sel[:100] + "..."
+            parts.append(f"Selected text: \"{sel}\"")
+        if ext_ctx.get("outline"):
+            outline = ext_ctx["outline"]
+            if len(outline) > 8:
+                parts.append(f"Document has {len(outline)} sections: {', '.join(outline[:6])}, and more.")
+            else:
+                parts.append(f"Document sections: {', '.join(outline)}.")
+
+    elif doc_type == "spreadsheet":
+        if ext_ctx.get("active_sheet"):
+            parts.append(f"Working on sheet \"{ext_ctx['active_sheet']}\".")
+        if ext_ctx.get("sheet_tabs") and len(ext_ctx["sheet_tabs"]) > 1:
+            parts.append(f"Spreadsheet has {len(ext_ctx['sheet_tabs'])} tabs: {', '.join(ext_ctx['sheet_tabs'][:5])}.")
+        if ext_ctx.get("selected_cell"):
+            cell_info = f"Selected cell: {ext_ctx['selected_cell']}"
+            if ext_ctx.get("cell_content"):
+                cell_info += f" containing \"{ext_ctx['cell_content']}\""
+            parts.append(cell_info + ".")
+
+    elif doc_type == "presentation":
+        slide_info = []
+        if ext_ctx.get("current_slide"):
+            slide_info.append(f"on slide {ext_ctx['current_slide']}")
+        if ext_ctx.get("total_slides"):
+            slide_info.append(f"of {ext_ctx['total_slides']} total")
+        if slide_info:
+            parts.append(f"Currently {' '.join(slide_info)}.")
+        if ext_ctx.get("speaker_notes"):
+            parts.append(f"Slide notes: \"{ext_ctx['speaker_notes'][:150]}\"")
+
+    elif doc_type == "email":
+        mode = ext_ctx.get("mode", "")
+        if mode == "composing":
+            if ext_ctx.get("subject"):
+                parts.append(f"Composing an email: \"{ext_ctx['subject']}\".")
+            else:
+                parts.append("Composing a new email.")
+        elif mode == "reading":
+            if ext_ctx.get("subject"):
+                parts.append(f"Reading email thread: \"{ext_ctx['subject']}\".")
+            if ext_ctx.get("thread_length"):
+                parts.append(f"Thread has {ext_ctx['thread_length']} messages.")
+        elif mode == "triage":
+            if ext_ctx.get("unread_count"):
+                parts.append(f"Triaging inbox ({ext_ctx['unread_count']} unread).")
+
+    elif doc_type == "calendar":
+        if ext_ctx.get("focused_event"):
+            parts.append(f"Looking at event: \"{ext_ctx['focused_event']}\".")
+
+    # Active prompt context — what the user is currently typing in an AI chat
+    if ext_ctx.get("active_prompt"):
+        prompt_ts = ext_ctx.get("active_prompt_ts", 0)
+        if time.time() - prompt_ts < 30:  # only if recent
+            app = ext_ctx.get("active_prompt_app", "an AI chat")
+            preview = ext_ctx["active_prompt"]
+            if len(preview) > 150:
+                preview = preview[:150] + "..."
+            parts.append(f"Currently typing in {app}: \"{preview}\"")
+
+    return " ".join(parts)
+
+
+def _format_capture_source(cap: dict) -> str:
+    """Format a capture's source for display in a prompt."""
+    hostname = cap.get("hostname", "")
+    title = cap.get("page_title", "")
+    app = cap.get("app", "")
+    capture_type = cap.get("capture_type", "")
+
+    if capture_type == "typing":
+        return app or hostname or "typing"
+
+    # Use hostname for web captures
+    if hostname:
+        # Clean up common domains
+        domain_labels = {
+            "mail.google.com": "Gmail",
+            "docs.google.com": "Google Doc",
+            "sheets.google.com": "Google Sheet",
+            "slides.google.com": "Google Slides",
+            "calendar.google.com": "Google Calendar",
+            "github.com": "GitHub",
+            "stackoverflow.com": "Stack Overflow",
+            "linear.app": "Linear",
+        }
+        label = domain_labels.get(hostname, hostname.split(".")[0].title())
+        if title and len(title) < 60:
+            return f"{label}: {title}"
+        return label
+
+    return app or title or "Unknown"
+
+
+def _extract_capture_summary(cap: dict) -> str:
+    """Extract the most useful content from a capture for prompt inclusion."""
+    # Priority: typing > viewport text > page content summary
+    typing = cap.get("typing_text")
+    if typing and typing.strip():
+        text = typing.strip()
+        if len(text) > 200:
+            text = text[:200] + "..."
+        return f'Typed: "{text}"'
+
+    # Use viewport text (what was on screen during engagement)
+    viewport = cap.get("viewport_text")
+    if viewport and viewport.strip():
+        # Take first meaningful chunk
+        lines = [l.strip() for l in viewport.split("\n") if l.strip()]
+        content = " ".join(lines)
+        if len(content) > 300:
+            content = content[:300] + "..."
+        return content
+
+    # Fall back to page content
+    page = cap.get("page_content")
+    if page and page.strip():
+        lines = [l.strip() for l in page.split("\n") if l.strip()]
+        content = " ".join(lines[:5])
+        if len(content) > 300:
+            content = content[:300] + "..."
+        return content
+
+    # Fall back to page title
+    title = cap.get("page_title")
+    if title:
+        return title
+
+    return ""
+
+
 class ContextServer:
     """HTTP server that serves the context model and runs enrichment in the background."""
 
@@ -28,6 +172,14 @@ class ContextServer:
         self.model = ContextModel()
         self.pipeline = EnrichmentPipeline()
         self._stop_event = threading.Event()
+        self._extension_context: dict[str, Any] = {}  # latest page context from extension
+        self._extension_lock = threading.Lock()
+        # Workflow clustering
+        from ..context.workflows import WorkflowClusterer
+        self.clusterer = WorkflowClusterer()
+        # Git watcher — observes what coding agents actually change
+        from ..observers.git_watcher import GitWatcher
+        self.git_watcher = GitWatcher()
         # Initialize LLM provider (optional)
         llm_config = load_llm_config()
         self.llm_provider: LLMProvider | None = create_provider(llm_config)
@@ -41,8 +193,12 @@ class ContextServer:
         try:
             ensure_schema(conn)
             self.model.load_from_db(conn)
+            self.clusterer.load_from_db(conn)
         finally:
             conn.close()
+
+        # Auto-discover git repos from known projects
+        self.git_watcher.auto_discover_from_model(self.model)
 
         # Start enrichment thread
         enrichment_thread = threading.Thread(
@@ -50,8 +206,126 @@ class ContextServer:
         )
         enrichment_thread.start()
 
+        # Start git watcher thread
+        git_thread = threading.Thread(
+            target=self._git_watch_loop, daemon=True, name="git-watcher"
+        )
+        git_thread.start()
+
         # Start HTTP server
         self._run_http()
+
+    def _process_extension_context(self, data: dict) -> None:
+        """Store page-level context received from the browser extension."""
+        source = data.get("source", "extension")
+
+        if source == "extension_input":
+            # AI chat typing activity — update activity scoring
+            app_hint = data.get("app", data.get("hostname", ""))
+            ts = data.get("timestamp", time.time())
+            self.model.now.record_extension_input(app_hint, ts)
+            # Store prompt preview for intent detection
+            preview = data.get("prompt_preview", "")
+            if preview:
+                with self._extension_lock:
+                    self._extension_context["active_prompt"] = preview
+                    self._extension_context["active_prompt_app"] = app_hint
+                    self._extension_context["active_prompt_ts"] = ts
+            logger.debug("Extension input: %s (%d chars)", app_hint, data.get("prompt_length", 0))
+            return
+
+        with self._extension_lock:
+            self._extension_context = data
+            logger.debug("Extension context: %s %s", data.get("type"), data.get("document_name", ""))
+
+    def get_extension_context(self) -> dict[str, Any]:
+        """Get the latest extension-captured page context."""
+        with self._extension_lock:
+            # Expire after 60s of no updates
+            ts = self._extension_context.get("timestamp", 0)
+            if time.time() - ts > 60:
+                return {}
+            return dict(self._extension_context)
+
+    def _process_capture(self, data: dict) -> dict:
+        """Process a viewport/typing capture from the extension."""
+        from ..context.workflows import extract_keywords
+        from ..store.database import insert_capture, get_connection as get_conn
+
+        # Extract keywords and compute engagement score
+        keywords = extract_keywords(data)
+        dwell = data.get("dwell_seconds", 0)
+        scroll_depth = data.get("scroll_depth", 0)
+        has_typing = bool(data.get("typing_text") or data.get("text_preview"))
+
+        engagement = (
+            min(1.0, dwell / 60) * 0.4 +  # dwell time (caps at 60s)
+            min(1.0, scroll_depth / 80) * 0.3 +  # scroll depth (caps at 80%)
+            (0.3 if has_typing else 0)  # typing bonus
+        )
+
+        data["topics"] = keywords
+        data["engagement_score"] = round(engagement, 3)
+
+        # Assign to workflow
+        conn = get_conn()
+        try:
+            workflow_id = self.clusterer.assign_workflow(data, conn)
+            data["workflow_id"] = workflow_id
+
+            # Store capture
+            capture_id = insert_capture(conn, data)
+
+            wf = self.clusterer.get_workflow(workflow_id)
+            return {
+                "ok": True,
+                "capture_id": capture_id,
+                "workflow_id": workflow_id,
+                "workflow_label": wf.label if wf else None,
+                "topics": keywords[:5],
+            }
+        finally:
+            conn.close()
+
+    def _build_workflow_prompt(self, wf) -> str:
+        """Build a pre-filled prompt from a workflow's knowledge trail."""
+        from ..store.database import fetch_captures_for_workflow, get_connection as get_conn
+
+        conn = get_conn()
+        try:
+            captures = fetch_captures_for_workflow(conn, wf.id, limit=15)
+        finally:
+            conn.close()
+
+        if not captures:
+            return "No captures in this workflow yet."
+
+        # Build structured prompt from captures
+        parts = []
+
+        # Workflow topic line
+        if wf.label:
+            parts.append(f"I've been researching: {wf.label}\n")
+        parts.append("Here's what I've gathered:\n")
+
+        seen_urls = set()
+        for cap in captures:
+            url = cap.get("url", "")
+            # Deduplicate by URL
+            if url and url in seen_urls:
+                continue
+            if url:
+                seen_urls.add(url)
+
+            source = _format_capture_source(cap)
+            content = _extract_capture_summary(cap)
+
+            if content:
+                parts.append(f"- [{source}] {content}")
+
+        parts.append("\n")  # Leave space for user's actual question
+
+        return "\n".join(parts)
 
     def _enrichment_loop(self) -> None:
         """Background loop that enriches events and updates the model."""
@@ -67,11 +341,59 @@ class ContextServer:
                         recent = fetch_recent_enriched(conn, hours=0.01, limit=50)
                         for event in reversed(recent):
                             self.model.process_enriched_event(event)
+                            # Auto-discover git repos from file paths in events
+                            self.git_watcher.register_from_enriched_event(event)
                     finally:
                         conn.close()
             except Exception:
                 logger.exception("Error in enrichment loop")
             self._stop_event.wait(timeout=3.0)
+
+    def _git_watch_loop(self) -> None:
+        """Background loop that captures actual code written by agents."""
+        from ..store.database import insert_code_snapshot
+        logger.info("Git watcher started")
+        while not self._stop_event.is_set():
+            try:
+                snapshots = self.git_watcher.check_all()
+                if snapshots:
+                    conn = get_connection()
+                    try:
+                        for snap in snapshots:
+                            # Assign to workflow based on project + file names
+                            from ..context.workflows import _WORD_RE, _STOP_WORDS
+                            keywords = [snap.project]
+                            if snap.branch and snap.branch not in ("main", "master"):
+                                keywords.append(snap.branch)
+                            for fd in snap.file_diffs[:5]:
+                                stem = fd.path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+                                if len(stem) > 2:
+                                    keywords.append(stem)
+
+                            workflow_id = None
+                            if keywords:
+                                workflow_id = self.clusterer._match_or_create(keywords, conn)
+                                wf = self.clusterer.get_workflow(workflow_id)
+                                if wf:
+                                    wf.add_project(snap.project)
+                                    for fd in snap.file_diffs:
+                                        wf.add_file(fd.path)
+
+                            data = snap.to_dict()
+                            data["workflow_id"] = workflow_id
+                            insert_code_snapshot(conn, data)
+
+                            logger.info(
+                                "Code snapshot: %s %s (+%d/-%d) %d files [wf:%s]",
+                                snap.project, snap.change_type,
+                                snap.total_additions, snap.total_deletions,
+                                len(snap.file_diffs), workflow_id,
+                            )
+                    finally:
+                        conn.close()
+            except Exception:
+                logger.exception("Error in git watcher loop")
+            self._stop_event.wait(timeout=10.0)
 
     def _run_http(self) -> None:
         """Run the HTTP server."""
@@ -105,7 +427,13 @@ class ContextServer:
         async def context_prompt(request):
             max_tokens = int(request.query_params.get("max_tokens", 250))
             tool = request.query_params.get("for", "coding")
+            ext_ctx = self.get_extension_context()
             text = generate_enhanced_prompt(self.model, self.llm_provider, max_tokens=max_tokens, tool=tool)
+            # Append deep page context from extension if available
+            if ext_ctx:
+                page_summary = _build_page_context_summary(ext_ctx)
+                if page_summary:
+                    text = text + " " + page_summary
             return PlainTextResponse(text)
 
         async def context_project(request):
@@ -133,6 +461,73 @@ class ContextServer:
         async def agents_workflow(request):
             return JSONResponse(self.model.agents.get_workflow_summary())
 
+        async def context_enrich(request):
+            """Receive page-level context from the browser extension."""
+            try:
+                body = await request.json()
+                self._process_extension_context(body)
+                return JSONResponse({"ok": True})
+            except Exception as e:
+                logger.warning("Extension enrich error: %s", e)
+                return JSONResponse({"error": str(e)}, status_code=400)
+
+        async def context_capture(request):
+            """Receive viewport/typing captures from the extension."""
+            try:
+                body = await request.json()
+                result = self._process_capture(body)
+                return JSONResponse(result)
+            except Exception as e:
+                logger.warning("Capture error: %s", e)
+                return JSONResponse({"error": str(e)}, status_code=400)
+
+        async def workflow_prompt(request):
+            """Get a pre-built prompt from the active workflow's knowledge trail."""
+            workflow_id = request.query_params.get("id")
+            if workflow_id:
+                wf = self.clusterer.get_workflow(int(workflow_id))
+            else:
+                wf = self.clusterer.get_active_workflow()
+            if not wf:
+                return PlainTextResponse("No active workflow detected yet. Browse some pages and lurk will pick up the trail.")
+            prompt = self._build_workflow_prompt(wf)
+            return PlainTextResponse(prompt)
+
+        async def code_changes(request):
+            """Get recent code snapshots — actual diffs of what agents wrote."""
+            project = request.query_params.get("project")
+            hours = float(request.query_params.get("hours", 4))
+            limit = int(request.query_params.get("limit", 10))
+            from ..store.database import fetch_recent_code_snapshots
+            conn = get_connection()
+            try:
+                snaps = fetch_recent_code_snapshots(conn, project=project, hours=hours, limit=limit)
+            finally:
+                conn.close()
+            return JSONResponse(snaps)
+
+        async def code_changes_summary(request):
+            """Get the actual code that was written, as readable context."""
+            project = request.query_params.get("project")
+            text = self.git_watcher.build_change_context(project=project)
+            if not text:
+                return PlainTextResponse("No recent code changes detected.")
+            return PlainTextResponse(text)
+
+        async def workflows_list(request):
+            """List all workflows for extension popup."""
+            include_completed = request.query_params.get("all", "false") == "true"
+            wfs = self.clusterer.list_workflows(include_completed=include_completed)
+            # Also include model-tracked workflows
+            model_wfs = self.model.workflows.list_workflows(include_completed=include_completed)
+            # Merge — model workflows may have more enriched-event data
+            seen_ids = {wf.id for wf in wfs}
+            for mwf in model_wfs:
+                if mwf.id not in seen_ids:
+                    wfs.append(mwf)
+            wfs.sort(key=lambda w: w.updated_ts, reverse=True)
+            return JSONResponse([wf.to_dict() for wf in wfs])
+
         app = Starlette(
             routes=[
                 Route("/status", status),
@@ -140,6 +535,12 @@ class ContextServer:
                 Route("/context/session", context_session),
                 Route("/context/prompt", context_prompt),
                 Route("/context/project/{name:str}", context_project),
+                Route("/context/enrich", context_enrich, methods=["POST"]),
+                Route("/context/capture", context_capture, methods=["POST"]),
+                Route("/context/workflow-prompt", workflow_prompt),
+                Route("/workflows", workflows_list),
+                Route("/changes", code_changes),
+                Route("/changes/summary", code_changes_summary),
                 Route("/context", context_full),
                 Route("/agents", agents_status),
                 Route("/agents/attention", agents_attention),
@@ -151,7 +552,7 @@ class ContextServer:
                 Middleware(
                     CORSMiddleware,
                     allow_origins=["*"],
-                    allow_methods=["GET"],
+                    allow_methods=["GET", "POST", "OPTIONS"],
                     allow_headers=["*"],
                 ),
             ],
@@ -167,11 +568,12 @@ class ContextServer:
 
         model = self.model
         llm_provider = self.llm_provider
+        server_self = self  # reference for extension context
 
         class Handler(BaseHTTPRequestHandler):
             def _cors_headers(self):
                 self.send_header("Access-Control-Allow-Origin", "*")
-                self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
                 self.send_header("Access-Control-Allow-Headers", "*")
 
             def do_OPTIONS(self):
@@ -194,6 +596,11 @@ class ContextServer:
                     max_tokens = int(params.get("max_tokens", [250])[0])
                     tool = params.get("for", ["coding"])[0]
                     text = generate_enhanced_prompt(model, llm_provider, max_tokens=max_tokens, tool=tool)
+                    ext_ctx = server_self.get_extension_context()
+                    if ext_ctx:
+                        page_summary = _build_page_context_summary(ext_ctx)
+                        if page_summary:
+                            text = text + " " + page_summary
                     self._text_response(text)
                 elif path.startswith("/context/project/"):
                     name = path.split("/context/project/", 1)[-1]
@@ -210,8 +617,58 @@ class ContextServer:
                     self._json_response(model.agents.get_handoff_context(from_id, to_tool))
                 elif path == "/agents/workflow":
                     self._json_response(model.agents.get_workflow_summary())
+                elif path == "/context/workflow-prompt":
+                    wf_id = params.get("id", [None])[0]
+                    if wf_id:
+                        wf = server_self.clusterer.get_workflow(int(wf_id))
+                    else:
+                        wf = server_self.clusterer.get_active_workflow()
+                    if not wf:
+                        self._text_response("No active workflow detected yet.")
+                    else:
+                        self._text_response(server_self._build_workflow_prompt(wf))
+                elif path == "/workflows":
+                    include_all = params.get("all", ["false"])[0] == "true"
+                    wfs = server_self.clusterer.list_workflows(include_completed=include_all)
+                    model_wfs = model.workflows.list_workflows(include_completed=include_all)
+                    seen_ids = {w.id for w in wfs}
+                    for mwf in model_wfs:
+                        if mwf.id not in seen_ids:
+                            wfs.append(mwf)
+                    wfs.sort(key=lambda w: w.updated_ts, reverse=True)
+                    self._json_response([w.to_dict() for w in wfs])
+                elif path == "/changes":
+                    from ..store.database import fetch_recent_code_snapshots
+                    proj = params.get("project", [None])[0]
+                    hrs = float(params.get("hours", [4])[0])
+                    lim = int(params.get("limit", [10])[0])
+                    c = get_connection()
+                    try:
+                        snaps = fetch_recent_code_snapshots(c, project=proj, hours=hrs, limit=lim)
+                    finally:
+                        c.close()
+                    self._json_response(snaps)
+                elif path == "/changes/summary":
+                    proj = params.get("project", [None])[0]
+                    text = server_self.git_watcher.build_change_context(project=proj)
+                    self._text_response(text or "No recent code changes detected.")
                 elif path == "/":
                     self._text_response("lurk context broker v0.1.0")
+                else:
+                    self.send_error(404)
+
+            def do_POST(self):
+                parsed = urllib.parse.urlparse(self.path)
+                path = parsed.path
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length)) if length else {}
+
+                if path == "/context/enrich":
+                    server_self._process_extension_context(body)
+                    self._json_response({"ok": True})
+                elif path == "/context/capture":
+                    result = server_self._process_capture(body)
+                    self._json_response(result)
                 else:
                     self.send_error(404)
 

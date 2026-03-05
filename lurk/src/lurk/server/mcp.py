@@ -137,6 +137,104 @@ def create_mcp_server():
         _refresh()
         return _get_model().agents.get_workflow_summary()
 
+    @mcp.tool()
+    def get_workflows(include_completed: bool = False) -> list[dict[str, Any]]:
+        """List all detected work workflows — topics the user is working on across tools. Each workflow tracks keywords, tools used, projects, files, and duration."""
+        _refresh()
+        return [wf.to_dict() for wf in _get_model().workflows.list_workflows(include_completed=include_completed)]
+
+    @mcp.tool()
+    def get_workflow_context(workflow_id: int) -> dict[str, Any]:
+        """Get full context for a specific workflow — topic keywords, tools, projects, files, tickets, captures, and recent knowledge trail."""
+        _refresh()
+        model = _get_model()
+        wf = model.workflows.get_workflow(workflow_id)
+        if not wf:
+            return {"error": f"Workflow {workflow_id} not found."}
+        result = wf.to_dict()
+        # Include recent captures if available
+        try:
+            conn = get_connection()
+            try:
+                from ..store.database import fetch_captures_for_workflow
+                captures = fetch_captures_for_workflow(conn, workflow_id, limit=10)
+                result["recent_captures"] = [
+                    {
+                        "ts": c.get("ts"),
+                        "page_title": c.get("page_title"),
+                        "hostname": c.get("hostname"),
+                        "summary": c.get("summary") or c.get("page_title"),
+                    }
+                    for c in captures
+                ]
+            finally:
+                conn.close()
+        except Exception:
+            result["recent_captures"] = []
+        return result
+
+    @mcp.tool()
+    def get_recent_code_changes(project: str = "", hours: float = 4) -> list[dict[str, Any]]:
+        """Get the actual code that AI agents wrote — full diffs, new file contents, per-file changes. This is the real work product, not just file names or commit messages."""
+        _refresh()
+        from ..store.database import fetch_recent_code_snapshots
+        conn = get_connection()
+        try:
+            return fetch_recent_code_snapshots(
+                conn, project=project or None, hours=hours, limit=10,
+            )
+        finally:
+            conn.close()
+
+    @mcp.tool()
+    def get_code_changes_summary(project: str = "") -> str:
+        """Readable summary of the actual code that was written — functions added, logic changed, new files created. Use this to understand what was just built before switching to another tool or continuing work."""
+        _refresh()
+        model = _get_model()
+        from ..observers.git_watcher import GitWatcher
+        watcher = GitWatcher()
+        watcher.auto_discover_from_model(model)
+        watcher.check_all()
+        text = watcher.build_change_context(project=project or None)
+        if not text:
+            from ..store.database import fetch_recent_code_snapshots
+            conn = get_connection()
+            try:
+                snaps = fetch_recent_code_snapshots(conn, project=project or None, hours=4, limit=5)
+            finally:
+                conn.close()
+            if not snaps:
+                return "No recent code changes detected."
+            parts = []
+            for s in snaps:
+                summary = s.get("summary", "")
+                if summary:
+                    parts.append(f"In {s.get('project', '?')} ({s.get('branch', '?')}):\n{summary}")
+            return "\n\n---\n\n".join(parts) if parts else "No recent code changes detected."
+        return text
+
+    @mcp.tool()
+    def get_active_workflow_prompt() -> str:
+        """Get a natural language prompt describing the user's currently active workflow — what they're working on, which tools they've used, and what context has been captured. Use this to understand the user's current work thread."""
+        _refresh()
+        model = _get_model()
+        wf = model.workflows.get_active_workflow()
+        if not wf:
+            return "No active workflow detected."
+        parts = [f"Active workflow: {wf.label or 'Unnamed'} ({wf.duration_label})"]
+        if wf.topic_keywords:
+            parts.append(f"Topics: {', '.join(wf.topic_keywords[:8])}")
+        if wf.tools:
+            parts.append(f"Tools used: {', '.join(wf.tools)}")
+        if wf.projects:
+            parts.append(f"Projects: {', '.join(wf.projects)}")
+        if wf.files:
+            parts.append(f"Files touched: {len(wf.files)}")
+        if wf.tickets:
+            parts.append(f"Tickets: {', '.join(wf.tickets)}")
+        parts.append(f"Activity: {wf.event_count} events, {wf.capture_count} captures")
+        return "\n".join(parts)
+
     return mcp
 
 

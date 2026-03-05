@@ -67,6 +67,10 @@ def generate_prompt(
     if agents:
         optional.append(("agents", agents))
 
+    code_changes = _build_code_changes_gated(model)
+    if code_changes:
+        optional.append(("code_changes", code_changes))
+
     # Intent-aware reordering
     optional = _reorder_by_intent(optional, now)
 
@@ -93,10 +97,13 @@ def _reorder_by_intent(
     activity = getattr(now, "activity", None) or ""
 
     priority_map: dict[str, list[str]] = {
-        "researching": ["research", "monitors", "agents", "cross_session", "files", "ticket"],
-        "debugging": ["files", "ticket", "agents", "research", "monitors", "cross_session"],
-        "coding": ["files", "ticket", "agents", "research", "monitors", "cross_session"],
-        "writing": ["monitors", "research", "agents", "cross_session", "files", "ticket"],
+        "researching": ["research", "code_changes", "monitors", "agents", "cross_session", "files", "ticket"],
+        "debugging": ["code_changes", "files", "ticket", "agents", "research", "monitors", "cross_session"],
+        "coding": ["code_changes", "files", "ticket", "agents", "research", "monitors", "cross_session"],
+        "writing": ["code_changes", "monitors", "research", "agents", "cross_session", "files", "ticket"],
+        "communicating": ["code_changes", "agents", "monitors", "research", "cross_session", "files", "ticket"],
+        "spreadsheet_work": ["monitors", "research", "agents", "code_changes", "files", "cross_session", "ticket"],
+        "planning": ["code_changes", "agents", "ticket", "monitors", "research", "cross_session", "files"],
     }
 
     # Pick priority from intent first, then activity
@@ -120,23 +127,74 @@ def _reorder_by_intent(
 # ---------------------------------------------------------------------------
 
 def _build_core(now) -> str:
-    """Build the core context sentence."""
+    """Build the core context sentence using activity scoring."""
     parts = []
 
-    activity = now.activity or "working"
-    app = now.app or "an application"
+    # Use activity scoring if available
+    primary = now.get_primary_activity() if hasattr(now, "get_primary_activity") else None
+    refs = now.get_reference_activities() if hasattr(now, "get_reference_activities") else []
 
-    if now.file and now.project:
-        parts.append(
-            f"The user is {activity} in {app}, editing {now.file} "
-            f"in the {now.project} project."
-        )
-    elif now.file:
-        parts.append(f"The user is {activity} in {app}, editing {now.file}.")
-    elif now.project:
-        parts.append(f"The user is {activity} in {app} on the {now.project} project.")
+    if primary and primary.input_seconds > 5:
+        # We know WHERE the user is actually working (keyboard input)
+        label = primary.label()
+        app = primary.app
+        activity = primary.activity
+
+        if primary.document_name:
+            sub = primary.sub_activity or ""
+            if sub == "spreadsheet":
+                parts.append(f"The user is actively working on spreadsheet \"{label}\" in {app}.")
+            elif sub == "presentation":
+                parts.append(f"The user is actively working on presentation \"{label}\" in {app}.")
+            else:
+                parts.append(f"The user is actively working on \"{label}\" in {app}.")
+        elif primary.file and primary.project:
+            parts.append(f"The user is actively {activity} in {app}, editing {primary.file} in the {primary.project} project.")
+        elif "ai_chat" in activity or "interacting" in activity:
+            parts.append(f"The user is actively typing a prompt in {app}.")
+        else:
+            parts.append(f"The user is actively {activity} in {app}.")
+
+        # Add reference context
+        if refs:
+            ref_labels = [r.label() for r in refs[:3]]
+            if len(ref_labels) == 1:
+                parts.append(f"Also has {ref_labels[0]} open for reference.")
+            else:
+                parts.append(f"Also referencing: {', '.join(ref_labels)}.")
     else:
-        parts.append(f"The user is {activity} in {app}.")
+        # Fall back to simple window-title based context
+        activity = now.activity or "working"
+        app = now.app or "an application"
+        doc_name = getattr(now, "document_name", None)
+
+        if doc_name:
+            sub = getattr(now, "sub_activity", None) or ""
+            if sub == "spreadsheet":
+                parts.append(f"The user is working on a spreadsheet \"{doc_name}\" in {app}.")
+            elif sub == "presentation":
+                parts.append(f"The user is working on a presentation \"{doc_name}\" in {app}.")
+            elif sub == "email_composing":
+                parts.append(f"The user is composing an email in {app}.")
+            elif sub == "email_reading":
+                parts.append(f"The user is reading email in {app}.")
+            elif sub == "email_triage":
+                parts.append(f"The user is triaging email in {app}.")
+            elif sub == "calendar":
+                parts.append(f"The user is checking their calendar in {app}.")
+            else:
+                parts.append(f"The user is working on \"{doc_name}\" in {app}.")
+        elif now.file and now.project:
+            parts.append(
+                f"The user is {activity} in {app}, editing {now.file} "
+                f"in the {now.project} project."
+            )
+        elif now.file:
+            parts.append(f"The user is {activity} in {app}, editing {now.file}.")
+        elif now.project:
+            parts.append(f"The user is {activity} in {app} on the {now.project} project.")
+        else:
+            parts.append(f"The user is {activity} in {app}.")
 
     if now.language:
         parts.append(f"Language: {now.language}.")
@@ -329,3 +387,62 @@ def _build_ticket_gated(now, session) -> str | None:
     if tickets:
         return f"Tickets worked on: {', '.join(tickets[-3:])}."
     return None
+
+
+def _build_code_changes_gated(model: ContextModel) -> str | None:
+    """Build code changes context — the actual code agents wrote.
+
+    This is critical for cross-tool context: when a user switches from
+    Claude Code to ChatGPT, the prompt should show the actual code that
+    was written, not just file names or commit messages.
+    """
+    try:
+        from ..store.database import fetch_recent_code_snapshots, get_connection
+        conn = get_connection()
+        try:
+            snapshots = fetch_recent_code_snapshots(conn, hours=2, limit=3)
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+    if not snapshots:
+        return None
+
+    parts: list[str] = []
+    chars_remaining = 600  # budget for code context in the prompt
+
+    for snap in snapshots:
+        summary = snap.get("summary", "")
+        project = snap.get("project", "?")
+        branch = snap.get("branch", "")
+
+        if not summary:
+            # Build from file_diffs if summary is empty
+            file_diffs = snap.get("file_diffs", [])
+            if isinstance(file_diffs, list):
+                for fd in file_diffs[:5]:
+                    if isinstance(fd, dict):
+                        path = fd.get("path", "?")
+                        additions = fd.get("additions", [])
+                        if additions:
+                            code_preview = "\n".join(additions[:10])
+                            summary += f"Added to {path}:\n{code_preview}\n"
+
+        if summary:
+            header = f"Recent code in {project}"
+            if branch and branch not in ("main", "master"):
+                header += f" ({branch})"
+            chunk = f"{header}:\n{summary}"
+            if len(chunk) <= chars_remaining:
+                parts.append(chunk)
+                chars_remaining -= len(chunk)
+            else:
+                # Truncate to fit
+                parts.append(chunk[:chars_remaining])
+                break
+
+    if not parts:
+        return None
+
+    return "\n".join(parts)

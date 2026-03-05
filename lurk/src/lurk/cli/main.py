@@ -328,6 +328,222 @@ def agents():
     console.print()
 
 
+@app.command()
+def changes(
+    project: Optional[str] = typer.Option(None, "--project", "-p", help="Filter by project name"),
+    hours: float = typer.Option(4, "--since", "-s", help="Hours of history to show"),
+    diff: bool = typer.Option(False, "--diff", "-d", help="Show actual diff content"),
+):
+    """Show what coding agents actually wrote — real diffs, not just metadata."""
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+    from lurk.store.database import ensure_schema, fetch_recent_code_snapshots, get_connection
+
+    conn = get_connection()
+    try:
+        ensure_schema(conn)
+        rows = fetch_recent_code_snapshots(conn, project=project, hours=hours, limit=10)
+    finally:
+        conn.close()
+
+    if not rows:
+        # Try live scan
+        console.print("[dim]No stored snapshots. Scanning git repos...[/dim]")
+        from lurk.observers.git_watcher import GitWatcher
+        from lurk.context.model import ContextModel
+        from lurk.enrichment.pipeline import EnrichmentPipeline
+
+        conn = get_connection()
+        try:
+            ensure_schema(conn)
+            EnrichmentPipeline().run_once()
+            model = ContextModel()
+            model.load_from_db(conn)
+        finally:
+            conn.close()
+
+        watcher = GitWatcher()
+        watcher.auto_discover_from_model(model)
+        snapshots = watcher.check_all()
+        if not snapshots:
+            console.print("[yellow]No code changes detected. Are coding agents running?[/yellow]")
+            return
+        rows = [s.to_dict() for s in snapshots]
+
+    if diff:
+        # Show the actual code that was written
+        for row in rows:
+            proj = row.get("project", "?")
+            branch = row.get("branch", "?")
+            console.print(f"\n[bold]{proj}[/bold] [dim](branch: {branch})[/dim]")
+            summary = row.get("summary", "")
+            if summary:
+                console.print(summary[:2000])
+            else:
+                full_diff = row.get("full_diff", "")
+                if full_diff:
+                    console.print(full_diff[:2000])
+            console.print("[dim]---[/dim]")
+        return
+
+    # Default: table view with file-level detail
+    from datetime import datetime
+
+    for row in rows:
+        proj = row.get("project", "?")
+        branch = row.get("branch", "?")
+        ts = datetime.fromtimestamp(row.get("ts", 0)).strftime("%H:%M")
+        change_type = row.get("change_type", "?")
+        adds = row.get("total_additions", 0)
+        dels = row.get("total_deletions", 0)
+
+        type_styled = {
+            "commit": "[green]commit[/green]",
+            "working": "[yellow]working[/yellow]",
+        }.get(change_type, change_type)
+
+        console.print(f"\n[bold]{proj}[/bold] {type_styled} [dim]{ts}[/dim] [dim]({branch})[/dim]  [green]+{adds}[/green]/[red]-{dels}[/red]")
+
+        file_diffs = row.get("file_diffs", [])
+        if isinstance(file_diffs, list):
+            for fd in file_diffs[:8]:
+                if isinstance(fd, dict):
+                    path = fd.get("path", "?")
+                    status = fd.get("status", "M")
+                    lang = fd.get("language", "")
+                    n_add = len(fd.get("additions", []))
+                    n_del = len(fd.get("deletions", []))
+
+                    status_icon = {"A": "[green]+ new[/green]", "D": "[red]- del[/red]", "M": "[yellow]~ mod[/yellow]", "R": "[cyan]→ ren[/cyan]"}.get(status, status)
+                    lang_hint = f" [dim]({lang})[/dim]" if lang else ""
+                    console.print(f"  {status_icon} {path}{lang_hint}  [green]+{n_add}[/green]/[red]-{n_del}[/red]")
+
+                    # Show a preview of what was actually written
+                    additions = fd.get("additions", [])
+                    if additions:
+                        preview_lines = [l for l in additions[:5] if l.strip()]
+                        if preview_lines:
+                            for line in preview_lines[:3]:
+                                console.print(f"    [green]+[/green] {line[:100]}")
+                            if len(additions) > 3:
+                                console.print(f"    [dim]...and {len(additions) - 3} more lines[/dim]")
+
+    console.print()
+    console.print("[dim]Use --diff for full diff content.[/dim]")
+
+
+@app.command()
+def workflows(
+    complete_id: Optional[int] = typer.Option(None, "--complete", "-c", help="Mark a workflow as completed"),
+    reopen_id: Optional[int] = typer.Option(None, "--reopen", "-r", help="Reopen a completed workflow"),
+    show_all: bool = typer.Option(False, "--all", "-a", help="Include completed workflows"),
+    prompt_id: Optional[int] = typer.Option(None, "--prompt", "-p", help="Print synthesized prompt for a workflow"),
+):
+    """List and manage workflows (auto-detected work contexts)."""
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+    from lurk.context.model import ContextModel
+    from lurk.store.database import ensure_schema, get_connection
+    from lurk.enrichment.pipeline import EnrichmentPipeline
+
+    conn = get_connection()
+    try:
+        ensure_schema(conn)
+        EnrichmentPipeline().run_once()
+        model = ContextModel()
+        model.load_from_db(conn)
+
+        # Handle --complete
+        if complete_id is not None:
+            ok = model.workflows.complete_workflow(complete_id, conn)
+            if ok:
+                console.print(f"[green]✓ Workflow {complete_id} marked as completed.[/green]")
+            else:
+                console.print(f"[red]Workflow {complete_id} not found.[/red]")
+            return
+
+        # Handle --reopen
+        if reopen_id is not None:
+            ok = model.workflows.reopen_workflow(reopen_id, conn)
+            if ok:
+                console.print(f"[green]✓ Workflow {reopen_id} reopened.[/green]")
+            else:
+                console.print(f"[red]Workflow {reopen_id} not found.[/red]")
+            return
+
+        # Handle --prompt
+        if prompt_id is not None:
+            wf = model.workflows.get_workflow(prompt_id)
+            if not wf:
+                console.print(f"[red]Workflow {prompt_id} not found.[/red]")
+                return
+            console.print(f"[bold]Workflow: {wf.label or f'#{wf.id}'}[/bold]")
+            console.print(f"  Keywords: {', '.join(wf.topic_keywords[:10])}")
+            console.print(f"  Tools: {', '.join(wf.tools) if wf.tools else 'none'}")
+            console.print(f"  Projects: {', '.join(wf.projects) if wf.projects else 'none'}")
+            console.print(f"  Files: {len(wf.files)}")
+            if wf.tickets:
+                console.print(f"  Tickets: {', '.join(wf.tickets)}")
+            console.print(f"  Duration: {wf.duration_label}")
+            console.print(f"  Events: {wf.event_count} | Captures: {wf.capture_count}")
+            # Try to build a workflow prompt
+            try:
+                from lurk.store.database import fetch_captures_for_workflow
+                captures = fetch_captures_for_workflow(conn, prompt_id, limit=10)
+                if captures:
+                    console.print()
+                    console.print("[bold]Recent captures:[/bold]")
+                    from datetime import datetime
+                    for cap in captures[:5]:
+                        ts = datetime.fromtimestamp(cap.get("ts", 0)).strftime("%H:%M")
+                        title = cap.get("page_title") or cap.get("hostname") or "?"
+                        console.print(f"  [{ts}] {title[:80]}")
+            except Exception:
+                pass
+            return
+
+    finally:
+        conn.close()
+
+    # Default: list workflows
+    wf_list = model.workflows.list_workflows(include_completed=show_all)
+    if not wf_list:
+        console.print("[yellow]No workflows detected yet.[/yellow]")
+        console.print("[dim]Workflows are auto-created as lurk observes your activity.[/dim]")
+        return
+
+    table = Table(title="Workflows")
+    table.add_column("ID", justify="right", style="dim")
+    table.add_column("Label", style="bold")
+    table.add_column("Status")
+    table.add_column("Tools", style="cyan")
+    table.add_column("Duration", justify="right")
+    table.add_column("Events", justify="right")
+
+    for wf in wf_list:
+        status_styled = {
+            "active": "[green]active[/green]",
+            "paused": "[yellow]paused[/yellow]",
+            "completed": "[dim]completed[/dim]",
+        }.get(wf.status, wf.status)
+
+        if wf.is_active:
+            status_styled = "[green]● active[/green]"
+
+        table.add_row(
+            str(wf.id),
+            wf.label or ", ".join(wf.topic_keywords[:3]),
+            status_styled,
+            ", ".join(wf.tools[:3]) if wf.tools else "",
+            wf.duration_label,
+            str(wf.event_count + wf.capture_count),
+        )
+
+    console.print(table)
+    console.print()
+    console.print("[dim]Manage: lurk workflows --complete <id> | --reopen <id> | --prompt <id>[/dim]")
+
+
 @app.command(name="serve-mcp")
 def serve_mcp():
     """Start the MCP server (stdio transport for Claude Code / Cursor)."""

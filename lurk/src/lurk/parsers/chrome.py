@@ -24,8 +24,16 @@ class ChromeParser(AppParser):
         "stackoverflow.com": ("researching", "stack_overflow"),
         "github.com": ("coding", None),
         "gitlab.com": ("coding", None),
+        # Google Workspace
         "docs.google.com": ("writing", "document"),
+        "sheets.google.com": ("spreadsheet_work", "spreadsheet"),
+        "slides.google.com": ("writing", "presentation"),
+        "drive.google.com": ("browsing", "file_management"),
         "mail.google.com": ("communicating", "email"),
+        "calendar.google.com": ("planning", "calendar"),
+        "meet.google.com": ("meeting", "video_call"),
+        "forms.google.com": ("writing", "form"),
+        # Other email/productivity
         "outlook.live.com": ("communicating", "email"),
         "outlook.office.com": ("communicating", "email"),
         "figma.com": ("designing", None),
@@ -39,6 +47,11 @@ class ChromeParser(AppParser):
         "youtube.com": ("browsing", "video"),
         "news.ycombinator.com": ("browsing", "social"),
     }
+
+    # Google Workspace title patterns for extracting document names
+    _google_doc_re = re.compile(r"^(.+?)\s*[-–—]\s*Google (?:Docs|Sheets|Slides|Forms)")
+    _gmail_re = re.compile(r"^(.+?)\s*[-–—]\s*.*mail\.google\.com|^Gmail\b|^Inbox\b")
+    _gcal_re = re.compile(r"^Google Calendar\b|^(.+?)\s*[-–—]\s*Google Calendar")
 
     # Title patterns for activity detection
     _research_patterns = [
@@ -73,6 +86,29 @@ class ChromeParser(AppParser):
                 ctx.sub_activity = sub
                 ctx.url_domain = domain
                 break
+
+        # Google Workspace — extract document/sheet/slide names from titles
+        google_doc_match = self._google_doc_re.match(title)
+        if google_doc_match:
+            ctx.document_name = google_doc_match.group(1).strip()
+
+        # Gmail — detect compose vs triage
+        if ctx.url_domain == "mail.google.com":
+            lower = title.lower()
+            if any(w in lower for w in ["inbox", "sent", "drafts", "starred", "all mail"]):
+                ctx.sub_activity = "email_triage"
+            elif "compose" in lower or "new message" in lower:
+                ctx.sub_activity = "email_composing"
+            else:
+                # Likely reading a specific email — title is subject line
+                ctx.sub_activity = "email_reading"
+                ctx.topic = title.split(" - ")[0].strip() if " - " in title else title
+
+        # Google Calendar — detect event vs browsing
+        if ctx.url_domain == "calendar.google.com":
+            gcal_match = self._gcal_re.match(title)
+            if gcal_match and gcal_match.group(1):
+                ctx.topic = gcal_match.group(1).strip()
 
         # Try research patterns
         for pattern, activity, sub in self._research_patterns:

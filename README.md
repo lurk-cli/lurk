@@ -120,8 +120,9 @@ lurk has two components:
 
 - **Files and projects** — parsed from VS Code, Cursor, Xcode, JetBrains, and terminal titles
 - **Languages** — from file extensions (`auth-middleware.ts` → TypeScript)
-- **Activity type** — coding, researching, communicating, designing, writing, meeting
-- **AI agent states** — Claude Code working, Cursor generating, OpenClaw triaging
+- **Activity type** — coding, researching, communicating, designing, writing, meeting, planning, spreadsheet work
+- **Google Workspace** — document names from Docs, Sheets, Slides; Gmail compose vs. triage vs. reading; Calendar events; Meet calls
+- **AI agent states** — Claude Code working, Cursor generating, Codex running, ChatGPT active
 - **Intent** — debugging, implementing, reviewing, researching
 - **Interruptibility** — deep focus (35 min in VS Code) vs. casual browsing (skimming Reddit)
 - **Tickets** — JIRA/Linear IDs from branch names, editor titles, and browser tabs
@@ -148,7 +149,7 @@ Agent states are inferred from title changes over time — a burst of rapid file
 
 ## Get started
 
-**Requirements:** macOS 13+
+**Requirements:** macOS 13+, Node.js 24+
 
 ```bash
 npm install -g lurk-cli@latest
