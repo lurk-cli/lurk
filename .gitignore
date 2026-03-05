@@ -1,0 +1,41 @@
+# macOS
+.DS_Store
+
+# Swift
+daemon/.build/
+daemon/.swiftpm/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+.venv/
+venv/
+.python-version
+
+# Node
+node_modules/
+package-lock.json
+
+# lurk runtime
+.lurk/
+
+# IDE
+.idea/
+.vscode/
+*.xcodeproj/
+*.xcworkspace/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.*
+
+# Claude Code
+.claude/

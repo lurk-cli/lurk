@@ -1,0 +1,45 @@
+{
+  "name": "lurk",
+  "version": "0.1.0",
+  "description": "Context broker for AI tools — lurk sees everything on your screen and gives every AI agent the full picture",
+  "bin": {
+    "lurk": "./bin/lurk.js"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "install.sh",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node bin/lurk.js --help"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zasanao/lurk.git"
+  },
+  "keywords": [
+    "context",
+    "mcp",
+    "ai",
+    "agent",
+    "workflow",
+    "claude",
+    "cursor",
+    "developer-tools",
+    "observability",
+    "local-first"
+  ],
+  "author": "zasanao",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/zasanao/lurk/issues"
+  },
+  "homepage": "https://github.com/zasanao/lurk#readme",
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin"
+  ]
+}
