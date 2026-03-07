@@ -157,3 +157,57 @@ CODE_SNAPSHOTS_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_code_snapshots_project ON code_snapshots(project)",
     "CREATE INDEX IF NOT EXISTS idx_code_snapshots_workflow ON code_snapshots(workflow_id)",
 ]
+
+# Stakeholder tracking — people the user interacts with
+STAKEHOLDERS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS stakeholders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    interactions INTEGER DEFAULT 0,
+    last_seen REAL,
+    contexts_json TEXT,
+    workflows_json TEXT
+)
+"""
+
+STAKEHOLDERS_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_stakeholders_name ON stakeholders(name)",
+    "CREATE INDEX IF NOT EXISTS idx_stakeholders_last_seen ON stakeholders(last_seen)",
+]
+
+# Artifact lifecycle — documents tracked through their lifecycle
+ARTIFACTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS artifacts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    type TEXT,
+    status TEXT DEFAULT 'draft',
+    created_ts REAL,
+    updated_ts REAL,
+    status_history_json TEXT,
+    workflows_json TEXT,
+    edit_count INTEGER DEFAULT 0
+)
+"""
+
+ARTIFACTS_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_artifacts_name ON artifacts(name)",
+    "CREATE INDEX IF NOT EXISTS idx_artifacts_updated ON artifacts(updated_ts)",
+]
+
+# Inferred decisions — decisions detected from activity patterns
+DECISIONS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    description TEXT NOT NULL,
+    confidence REAL DEFAULT 0.0,
+    source_events_json TEXT,
+    workflow_id INTEGER
+)
+"""
+
+DECISIONS_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_decisions_ts ON decisions(ts)",
+    "CREATE INDEX IF NOT EXISTS idx_decisions_workflow ON decisions(workflow_id)",
+]

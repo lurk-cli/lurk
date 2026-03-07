@@ -70,18 +70,21 @@ def _smart_start():
             console.print("  Then run [cyan]lurk[/cyan] again.")
         raise typer.Exit(1)
 
-    # Step 2: Start daemon
+    # Step 2: Ensure Ollama is available (local LLM for context synthesis)
+    _ensure_ollama()
+
+    # Step 3: Start daemon
     if not daemon_running:
         _start_daemon(daemon_path)
 
-    # Step 3: Start engine (HTTP server in background)
+    # Step 4: Start engine (HTTP server in background)
     if not engine_running:
         _start_engine()
 
-    # Step 4: Auto-connect any detected AI tools (silent, no prompts)
+    # Step 5: Auto-connect any detected AI tools (silent, no prompts)
     _auto_connect_tools()
 
-    # Step 5: Check accessibility (just open settings if needed, don't block)
+    # Step 6: Check accessibility (just open settings if needed, don't block)
     _check_accessibility_silent()
 
     console.print()
@@ -101,6 +104,66 @@ def _is_pid_alive(pid_file: Path) -> bool:
     except (ProcessLookupError, ValueError, OSError):
         pid_file.unlink(missing_ok=True)
         return False
+
+
+def _ensure_ollama() -> None:
+    """Ensure Ollama is installed, running, and has the model. Silent on success."""
+    import shutil
+
+    from ..llm.provider import DEFAULT_MODEL, detect_ollama, ensure_ollama_model
+
+    # Check if Ollama is already running with the model
+    if detect_ollama():
+        if ensure_ollama_model(DEFAULT_MODEL):
+            console.print(f"  [green]✓[/green] Ollama ({DEFAULT_MODEL})")
+            return
+        # Ollama running but model pull failed — still usable without LLM
+        console.print(f"  [dim]Ollama running but model pull failed — context works without LLM[/dim]")
+        return
+
+    # Ollama not running — try to start it
+    ollama_bin = shutil.which("ollama")
+    if ollama_bin:
+        # Ollama installed but not running — start the service
+        try:
+            subprocess.Popen(
+                [ollama_bin, "serve"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            time.sleep(2)  # give it a moment to start
+            if detect_ollama():
+                if ensure_ollama_model(DEFAULT_MODEL):
+                    console.print(f"  [green]✓[/green] Ollama started ({DEFAULT_MODEL})")
+                    return
+        except Exception:
+            pass
+
+    # Ollama not installed — try to install via brew
+    if not ollama_bin and shutil.which("brew"):
+        console.print("  Installing Ollama...")
+        try:
+            result = subprocess.run(
+                ["brew", "install", "ollama"],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode == 0:
+                ollama_bin = shutil.which("ollama")
+                if ollama_bin:
+                    subprocess.Popen(
+                        [ollama_bin, "serve"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    time.sleep(2)
+                    if detect_ollama() and ensure_ollama_model(DEFAULT_MODEL):
+                        console.print(f"  [green]✓[/green] Ollama installed ({DEFAULT_MODEL})")
+                        return
+        except Exception:
+            pass
+
+    # Ollama unavailable — lurk still works, just no LLM synthesis
+    console.print("  [dim]Ollama not available — context works without LLM[/dim]")
 
 
 def _start_daemon(daemon_path: str) -> None:

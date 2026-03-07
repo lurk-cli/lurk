@@ -98,6 +98,35 @@ class EnrichmentPipeline:
             })
             return
 
+        # Handle calendar context events — extract meeting data
+        if event_type == "calendar_context":
+            data = {}
+            if event.get("data"):
+                try:
+                    data = json.loads(event["data"]) if isinstance(event["data"], str) else event["data"]
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            upcoming = data.get("upcoming_events", [])
+            for cal_event in upcoming:
+                if not isinstance(cal_event, dict):
+                    continue
+                if cal_event.get("in_progress"):
+                    title = cal_event.get("title", "Meeting")
+                    insert_enriched_event(conn, {
+                        "event_id": event["id"],
+                        "ts": ts,
+                        "app": "Calendar",
+                        "title": title,
+                        "document_name": title,
+                        "topic": title,
+                        "activity": "meeting",
+                        "sub_activity": "in_meeting",
+                        "interruptibility": "low",
+                        "data": json.dumps(cal_event),
+                    })
+                    return
+            return
+
         # Only parse title_change and app_switch events
         if event_type not in ("title_change", "app_switch"):
             return

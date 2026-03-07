@@ -66,6 +66,13 @@ class AgentConfig:
 
 
 @dataclass
+class PMConfig:
+    """PM persona configuration."""
+    mode: str = "auto"  # auto | on | off
+    post_meeting_window_minutes: int = 15
+
+
+@dataclass
 class LurkConfig:
     """Full lurk configuration."""
     observation: ObservationConfig = field(default_factory=ObservationConfig)
@@ -75,6 +82,7 @@ class LurkConfig:
     http: HttpConfig = field(default_factory=HttpConfig)
     prompt: PromptConfig = field(default_factory=PromptConfig)
     agents: AgentConfig = field(default_factory=AgentConfig)
+    pm: PMConfig = field(default_factory=PMConfig)
 
 
 def load_config(config_path: Path | None = None) -> LurkConfig:
@@ -159,6 +167,14 @@ def load_config(config_path: Path | None = None) -> LurkConfig:
             config.agents = AgentConfig(
                 enabled=ag.get("enabled", True),
                 stale_timeout=ag.get("stale_timeout", 600.0),
+            )
+
+        # PM persona
+        pm = data.get("pm", {})
+        if pm:
+            config.pm = PMConfig(
+                mode=pm.get("mode", "auto"),
+                post_meeting_window_minutes=pm.get("post_meeting_window_minutes", 15),
             )
 
         return config

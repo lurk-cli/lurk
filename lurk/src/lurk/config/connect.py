@@ -19,6 +19,9 @@ SUPPORTED_TOOLS = {
     "codex": "Codex",
 }
 
+LURK_DIR = Path.home() / ".lurk"
+EXTENSION_DEST = LURK_DIR / "extension"
+
 MCP_ENTRY = {
     "command": "lurk",
     "args": ["serve-mcp"],
@@ -146,3 +149,5 @@ def _connect_json_mcp(tool: str, config_path: Path) -> tuple[bool, str]:
 
     except Exception as e:
         return False, f"Failed to update {tool_name} config: {e}"
+
+

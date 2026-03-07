@@ -10,13 +10,18 @@ from typing import Any
 
 from ..context.model import ContextModel
 from ..enrichment.pipeline import EnrichmentPipeline
-from ..llm.config import load_llm_config
 from ..llm.enhanced_prompt import generate_enhanced_prompt
 from ..llm.provider import LLMProvider, create_provider
 from ..server.prompt import generate_prompt
 from ..store.database import ensure_schema, get_connection
 
 logger = logging.getLogger("lurk.http")
+
+_AGENT_BREADCRUMB_KEYWORDS = ("asking", "using", "claude", "chatgpt", "gemini", "copilot", "built", "perplexity")
+
+def _filter_agent_breadcrumbs(breadcrumbs: list[str]) -> list[str]:
+    """Filter breadcrumbs to only agent-related entries."""
+    return [b for b in breadcrumbs if any(kw in b.lower() for kw in _AGENT_BREADCRUMB_KEYWORDS)]
 
 
 def _build_page_context_summary(ext_ctx: dict) -> str:
@@ -185,15 +190,20 @@ class ContextServer:
         self.session_watcher = SessionWatcher()
         # Screenshot observer — OCR-based screen content analysis
         from ..observers.screenshot_observer import ScreenshotObserver
-        self.screenshot_observer = ScreenshotObserver()
+        self.screenshot_observer = ScreenshotObserver(
+            input_state_fn=lambda: self.model.now.input_state
+        )
+        # AI chat observer — tracks web-based AI tool usage
+        from ..observers.ai_chat_observer import AIChatObserver
+        self.ai_chat_observer = AIChatObserver()
         # Registered observers (WorkflowObserver protocol)
         from ..observers.base import WorkflowObserver
         self._observers: list[WorkflowObserver] = []
-        # Initialize LLM provider (optional)
-        llm_config = load_llm_config()
-        self.llm_provider: LLMProvider | None = create_provider(llm_config)
+        # Initialize LLM provider (optional — Ollama auto-detected)
+        from ..llm.config import load_llm_config
+        self.llm_provider: LLMProvider | None = create_provider(load_llm_config())
         if self.llm_provider:
-            logger.info("LLM provider: %s (%s)", self.llm_provider.name, llm_config.model)
+            logger.info("LLM provider: %s (%s)", self.llm_provider.name, self.llm_provider.model)
 
     def register_observer(self, observer) -> None:
         """Register a WorkflowObserver to be polled in the observer loop."""
@@ -266,6 +276,12 @@ class ContextServer:
         )
         screenshot_thread.start()
 
+        # Start AI chat observer thread
+        ai_chat_thread = threading.Thread(
+            target=self._ai_chat_watch_loop, daemon=True, name="ai-chat-observer"
+        )
+        ai_chat_thread.start()
+
         # Start HTTP server
         self._run_http()
 
@@ -285,7 +301,20 @@ class ContextServer:
                     self._extension_context["active_prompt"] = preview
                     self._extension_context["active_prompt_app"] = app_hint
                     self._extension_context["active_prompt_ts"] = ts
+            # Cross-tool context linking: capture what user was doing before AI chat
+            prior = self.model.now.to_dict()
+            prior_context = {}
+            if prior.get("app") and prior["app"] != app_hint:
+                prior_context["prior_app"] = prior.get("app")
+                prior_context["prior_activity"] = prior.get("activity")
+                prior_context["prior_project"] = prior.get("project")
+                prior_context["prior_document"] = prior.get("document_name")
+            if prior_context:
+                data["prior_context"] = prior_context
+
             logger.debug("Extension input: %s (%d chars)", app_hint, data.get("prompt_length", 0))
+            # Feed into AI chat observer for workflow tracking
+            self.ai_chat_observer.process_input(data)
             return
 
         with self._extension_lock:
@@ -497,6 +526,23 @@ class ContextServer:
                 logger.exception("Error in screenshot observer loop")
             self._stop_event.wait(timeout=10.0)
 
+    def _ai_chat_watch_loop(self) -> None:
+        """Background loop that processes AI chat observations."""
+        logger.info("AI chat observer started")
+        while not self._stop_event.is_set():
+            try:
+                updates = self.ai_chat_observer.check()
+                if updates:
+                    conn = get_connection()
+                    try:
+                        for update in updates:
+                            self._apply_workflow_update(update, conn)
+                    finally:
+                        conn.close()
+            except Exception:
+                logger.exception("Error in AI chat observer loop")
+            self._stop_event.wait(timeout=5.0)
+
     def _run_http(self) -> None:
         """Run the HTTP server."""
         try:
@@ -664,6 +710,55 @@ class ContextServer:
             wfs.sort(key=lambda w: w.updated_ts, reverse=True)
             return JSONResponse([wf.to_dict() for wf in wfs])
 
+        async def stakeholders_list(request):
+            """Get people the user has interacted with."""
+            wf_id = request.query_params.get("workflow_id")
+            if wf_id:
+                stakeholders = self.model.stakeholders.get_for_workflow(int(wf_id))
+                return JSONResponse({"workflow_id": int(wf_id), "stakeholders": [s.to_dict() for s in stakeholders]})
+            return JSONResponse(self.model.stakeholders.to_dict())
+
+        async def artifacts_list(request):
+            """Get documents and their lifecycle status."""
+            wf_id = request.query_params.get("workflow_id")
+            if wf_id:
+                artifacts = self.model.artifacts.get_for_workflow(int(wf_id))
+                return JSONResponse({"workflow_id": int(wf_id), "artifacts": [a.to_dict() for a in artifacts]})
+            return JSONResponse(self.model.artifacts.to_dict())
+
+        async def decisions_list(request):
+            """Get inferred decisions from activity patterns."""
+            hours = float(request.query_params.get("hours", 4))
+            wf_id = request.query_params.get("workflow_id")
+            if wf_id:
+                decisions = self.model.decisions.get_for_workflow(int(wf_id))
+                return JSONResponse({"workflow_id": int(wf_id), "decisions": [d.to_dict() for d in decisions]})
+            recent = self.model.decisions.get_recent(hours=hours)
+            return JSONResponse({"total": len(recent), "recent": [d.to_dict() for d in recent]})
+
+        async def workflow_agent_history(request):
+            """Get AI tool contributions to a workflow."""
+            wf_id = request.query_params.get("workflow_id", "0")
+            wf_id_int = int(wf_id)
+            if wf_id_int > 0:
+                wf = self.clusterer.get_workflow(wf_id_int)
+            else:
+                wf = self.clusterer.get_active_workflow()
+                # Also check model workflows
+                if not wf:
+                    wf = self.model.workflows.get_active_workflow()
+            if not wf:
+                return JSONResponse({"error": "No active workflow found."})
+            return JSONResponse({
+                "workflow_id": wf.id,
+                "label": wf.label,
+                "tools": wf.tools,
+                "agent_contributions": wf.agent_contributions,
+                "breadcrumbs": _filter_agent_breadcrumbs(wf.breadcrumbs[-20:]),
+                "code_changes": wf.code_changes[-10:],
+                "documents": dict(list(wf.documents.items())[-5:]),
+            })
+
         app = Starlette(
             routes=[
                 Route("/status", status),
@@ -676,6 +771,7 @@ class ContextServer:
                 Route("/context/feedback", context_feedback, methods=["POST"]),
                 Route("/context/workflow-prompt", workflow_prompt),
                 Route("/workflows", workflows_list),
+                Route("/workflows/agent-history", workflow_agent_history),
                 Route("/sessions", agent_sessions),
                 Route("/sessions/context", agent_session_context),
                 Route("/changes", code_changes),
@@ -685,6 +781,9 @@ class ContextServer:
                 Route("/agents/attention", agents_attention),
                 Route("/agents/handoff", agents_handoff),
                 Route("/agents/workflow", agents_workflow),
+                Route("/stakeholders", stakeholders_list),
+                Route("/artifacts", artifacts_list),
+                Route("/decisions", decisions_list),
                 Route("/", lambda r: PlainTextResponse("lurk context broker v0.1.0")),
             ],
             middleware=[
@@ -776,6 +875,27 @@ class ContextServer:
                             wfs.append(mwf)
                     wfs.sort(key=lambda w: w.updated_ts, reverse=True)
                     self._json_response([w.to_dict() for w in wfs])
+                elif path == "/workflows/agent-history":
+                    wf_id = params.get("workflow_id", ["0"])[0]
+                    wf_id_int = int(wf_id)
+                    if wf_id_int > 0:
+                        wf = server_self.clusterer.get_workflow(wf_id_int)
+                    else:
+                        wf = server_self.clusterer.get_active_workflow()
+                        if not wf:
+                            wf = model.workflows.get_active_workflow()
+                    if not wf:
+                        self._json_response({"error": "No active workflow found."})
+                    else:
+                        self._json_response({
+                            "workflow_id": wf.id,
+                            "label": wf.label,
+                            "tools": wf.tools,
+                            "agent_contributions": wf.agent_contributions,
+                            "breadcrumbs": _filter_agent_breadcrumbs(wf.breadcrumbs[-20:]),
+                            "code_changes": wf.code_changes[-10:],
+                            "documents": dict(list(wf.documents.items())[-5:]),
+                        })
                 elif path == "/sessions":
                     sessions = server_self.session_watcher.get_recent_sessions(limit=5)
                     self._json_response([s.to_dict() for s in sessions])
@@ -798,6 +918,29 @@ class ContextServer:
                     proj = params.get("project", [None])[0]
                     text = server_self.git_watcher.build_change_context(project=proj)
                     self._text_response(text or "No recent code changes detected.")
+                elif path == "/stakeholders":
+                    wf_id = params.get("workflow_id", [None])[0]
+                    if wf_id:
+                        stakeholders = model.stakeholders.get_for_workflow(int(wf_id))
+                        self._json_response({"workflow_id": int(wf_id), "stakeholders": [s.to_dict() for s in stakeholders]})
+                    else:
+                        self._json_response(model.stakeholders.to_dict())
+                elif path == "/artifacts":
+                    wf_id = params.get("workflow_id", [None])[0]
+                    if wf_id:
+                        artifacts = model.artifacts.get_for_workflow(int(wf_id))
+                        self._json_response({"workflow_id": int(wf_id), "artifacts": [a.to_dict() for a in artifacts]})
+                    else:
+                        self._json_response(model.artifacts.to_dict())
+                elif path == "/decisions":
+                    hrs = float(params.get("hours", [4])[0])
+                    wf_id = params.get("workflow_id", [None])[0]
+                    if wf_id:
+                        decisions = model.decisions.get_for_workflow(int(wf_id))
+                        self._json_response({"workflow_id": int(wf_id), "decisions": [d.to_dict() for d in decisions]})
+                    else:
+                        recent = model.decisions.get_recent(hours=hrs)
+                        self._json_response({"total": len(recent), "recent": [d.to_dict() for d in recent]})
                 elif path == "/":
                     self._text_response("lurk context broker v0.1.0")
                 else:

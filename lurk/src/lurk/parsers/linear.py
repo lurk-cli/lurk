@@ -18,7 +18,7 @@ class LinearParser(AppParser):
         ctx = ParsedContext(
             app=app,
             parser_name=self.name,
-            activity="coding",
+            activity="planning",
             sub_activity="project_management",
         )
 

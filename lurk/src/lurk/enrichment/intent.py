@@ -72,6 +72,16 @@ class IntentClassifier:
             if sub in ("stack_overflow", "documentation", "learning"):
                 return "researching"
 
+            if sub == "product_strategy":
+                return "strategizing"
+
+        if event.activity == "video_editing":
+            return "editing_media"
+        if event.activity == "data_analysis":
+            return "analyzing_data"
+        if event.activity == "support":
+            return "handling_tickets"
+
         if event.activity == "meeting":
             return "meeting"
 
@@ -118,6 +128,32 @@ class IntentClassifier:
                 if alternations >= 3:
                     return "tdd"
 
+        # Planning ↔ writing loop → planning_session
+        planning_writing_transitions = []
+        for i in range(1, len(recent)):
+            prev_plan = recent[i - 1].activity == "planning"
+            curr_write = recent[i].activity == "writing"
+            curr_plan = recent[i].activity == "planning"
+            prev_write = recent[i - 1].activity == "writing"
+            if (prev_plan and curr_write) or (prev_write and curr_plan):
+                planning_writing_transitions.append(i)
+
+        if len(planning_writing_transitions) >= 3:
+            return "planning_session"
+
+        # Data analysis ↔ writing loop → reporting
+        data_writing_transitions = []
+        for i in range(1, len(recent)):
+            prev_data = recent[i - 1].activity == "data_analysis"
+            curr_write = recent[i].activity == "writing"
+            curr_data = recent[i].activity == "data_analysis"
+            prev_write = recent[i - 1].activity == "writing"
+            if (prev_data and curr_write) or (prev_write and curr_data):
+                data_writing_transitions.append(i)
+
+        if len(data_writing_transitions) >= 3:
+            return "reporting"
+
         return None
 
     def _temporal_intent(self, event: EventRecord) -> str | None:
@@ -135,6 +171,17 @@ class IntentClassifier:
                 duration = event.ts - same_file_events[0].ts
                 if duration > 900:  # >15 minutes
                     return "feature_development"
+
+        # Sustained focus in designing/video_editing → deep creative work
+        if event.activity in ("designing", "video_editing"):
+            same_activity_events = [
+                e for e in self.window
+                if e.activity == event.activity
+            ]
+            if same_activity_events:
+                duration = event.ts - same_activity_events[0].ts
+                if duration > 900:  # >15 minutes
+                    return "deep_creative_work"
 
         # Rapid context switching → context_switching
         recent_5min = [

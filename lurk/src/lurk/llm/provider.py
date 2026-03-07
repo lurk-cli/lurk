@@ -1,12 +1,11 @@
-"""LLM provider abstraction — Ollama (local) and cloud API key providers.
+"""LLM provider — Ollama by default, raw screen text as fallback.
 
-Supports:
-- Ollama (local, privacy-preserving, auto-detected)
-- Anthropic (cloud, user API key)
-- OpenAI (cloud, user API key)
-- None (rules-based fallback, the default)
+Ollama runs locally, costs nothing, and keeps data on-machine.
+lurk auto-detects it, auto-pulls the model, and uses it.
+No API keys, no config, no cost.
 
-Provider is never required. If unavailable, silently falls back to rules-based.
+If Ollama isn't available, the raw screen text goes directly to the
+consuming agent (which IS an LLM). Still works, just less synthesized.
 """
 
 from __future__ import annotations
@@ -15,24 +14,12 @@ import json
 import logging
 import urllib.error
 import urllib.request
-from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 logger = logging.getLogger("lurk.llm")
 
-
-@dataclass
-class LLMConfig:
-    """LLM configuration from YAML/settings."""
-    provider: str = "none"  # none | ollama | anthropic | openai
-    model: str = "llama3.2:3b"
-    api_key: str | None = None
-    ollama_url: str = "http://localhost:11434"
-    use_for: list[str] = field(default_factory=lambda: [
-        "prompt_generation", "intent_classification", "session_summaries"
-    ])
-    fallback: str = "rules"
-    timeout: float = 5.0  # seconds
+DEFAULT_MODEL = "llama3.2:3b"
+OLLAMA_URL = "http://localhost:11434"
 
 
 @dataclass
@@ -40,34 +27,15 @@ class LLMResponse:
     """Response from an LLM provider."""
     text: str
     model: str
-    provider: str
     tokens_used: int = 0
 
 
-class LLMProvider(ABC):
-    """Abstract LLM provider."""
+class LLMProvider:
+    """Ollama LLM provider — local, free, auto-detected."""
 
-    @abstractmethod
-    def generate(self, prompt: str, system: str = "", max_tokens: int = 500) -> LLMResponse | None:
-        """Generate a response. Returns None on failure (caller uses fallback)."""
-
-    @abstractmethod
-    def is_available(self) -> bool:
-        """Check if the provider is ready to use."""
-
-    @property
-    @abstractmethod
-    def name(self) -> str:
-        """Provider name."""
-
-
-class OllamaProvider(LLMProvider):
-    """Local Ollama provider — privacy-preserving, auto-detected."""
-
-    def __init__(self, config: LLMConfig) -> None:
-        self.base_url = config.ollama_url
-        self.model = config.model
-        self.timeout = config.timeout
+    def __init__(self, model: str = DEFAULT_MODEL, base_url: str = OLLAMA_URL) -> None:
+        self.model = model
+        self.base_url = base_url
         self._available: bool | None = None
 
     @property
@@ -75,6 +43,7 @@ class OllamaProvider(LLMProvider):
         return "ollama"
 
     def is_available(self) -> bool:
+        """Check if Ollama is running and has the model."""
         if self._available is not None:
             return self._available
         try:
@@ -83,17 +52,15 @@ class OllamaProvider(LLMProvider):
                 data = json.loads(resp.read())
                 models = [m.get("name", "") for m in data.get("models", [])]
                 self._available = any(self.model in m for m in models)
-                if self._available:
-                    logger.info("Ollama detected with model %s", self.model)
-                else:
-                    logger.warning("Ollama running but model %s not found. Available: %s",
-                                   self.model, ", ".join(models[:5]))
+                if not self._available:
+                    logger.debug("Ollama running but model %s not found", self.model)
                 return self._available
         except Exception:
             self._available = False
             return False
 
     def generate(self, prompt: str, system: str = "", max_tokens: int = 500) -> LLMResponse | None:
+        """Generate a response. Returns None on failure."""
         try:
             payload = {
                 "model": self.model,
@@ -112,12 +79,11 @@ class OllamaProvider(LLMProvider):
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with urllib.request.urlopen(req, timeout=10) as resp:
                 result = json.loads(resp.read())
                 return LLMResponse(
                     text=result.get("response", "").strip(),
                     model=self.model,
-                    provider="ollama",
                     tokens_used=result.get("eval_count", 0),
                 )
         except Exception as e:
@@ -125,153 +91,60 @@ class OllamaProvider(LLMProvider):
             return None
 
 
-class AnthropicProvider(LLMProvider):
-    """Anthropic Claude provider — requires user API key."""
-
-    def __init__(self, config: LLMConfig) -> None:
-        self.api_key = config.api_key
-        self.model = config.model or "claude-haiku-4-5-20251001"
-        self.timeout = config.timeout
-
-    @property
-    def name(self) -> str:
-        return "anthropic"
-
-    def is_available(self) -> bool:
-        return bool(self.api_key)
-
-    def generate(self, prompt: str, system: str = "", max_tokens: int = 500) -> LLMResponse | None:
-        if not self.api_key:
-            return None
-        try:
-            messages = [{"role": "user", "content": prompt}]
-            payload: dict = {
-                "model": self.model,
-                "max_tokens": max_tokens,
-                "messages": messages,
-            }
-            if system:
-                payload["system"] = system
-
-            data = json.dumps(payload).encode()
-            req = urllib.request.Request(
-                "https://api.anthropic.com/v1/messages",
-                data=data,
-                headers={
-                    "Content-Type": "application/json",
-                    "x-api-key": self.api_key,
-                    "anthropic-version": "2023-06-01",
-                },
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                result = json.loads(resp.read())
-                text = ""
-                for block in result.get("content", []):
-                    if block.get("type") == "text":
-                        text += block.get("text", "")
-                usage = result.get("usage", {})
-                return LLMResponse(
-                    text=text.strip(),
-                    model=self.model,
-                    provider="anthropic",
-                    tokens_used=usage.get("output_tokens", 0),
-                )
-        except Exception as e:
-            logger.debug("Anthropic generate failed: %s", e)
-            return None
-
-
-class OpenAIProvider(LLMProvider):
-    """OpenAI provider — requires user API key."""
-
-    def __init__(self, config: LLMConfig) -> None:
-        self.api_key = config.api_key
-        self.model = config.model or "gpt-4o-mini"
-        self.timeout = config.timeout
-
-    @property
-    def name(self) -> str:
-        return "openai"
-
-    def is_available(self) -> bool:
-        return bool(self.api_key)
-
-    def generate(self, prompt: str, system: str = "", max_tokens: int = 500) -> LLMResponse | None:
-        if not self.api_key:
-            return None
-        try:
-            messages = []
-            if system:
-                messages.append({"role": "system", "content": system})
-            messages.append({"role": "user", "content": prompt})
-
-            payload = {
-                "model": self.model,
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "temperature": 0.3,
-            }
-            data = json.dumps(payload).encode()
-            req = urllib.request.Request(
-                "https://api.openai.com/v1/chat/completions",
-                data=data,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {self.api_key}",
-                },
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                result = json.loads(resp.read())
-                text = result["choices"][0]["message"]["content"]
-                usage = result.get("usage", {})
-                return LLMResponse(
-                    text=text.strip(),
-                    model=self.model,
-                    provider="openai",
-                    tokens_used=usage.get("completion_tokens", 0),
-                )
-        except Exception as e:
-            logger.debug("OpenAI generate failed: %s", e)
-            return None
-
-
-def create_provider(config: LLMConfig) -> LLMProvider | None:
-    """Create the appropriate LLM provider from config.
-
-    Returns None if provider is 'none' or not configured.
-    """
-    if config.provider == "none":
-        return None
-    elif config.provider == "ollama":
-        provider = OllamaProvider(config)
-        if provider.is_available():
-            return provider
-        logger.info("Ollama not available, LLM features disabled")
-        return None
-    elif config.provider == "anthropic":
-        provider = AnthropicProvider(config)
-        if provider.is_available():
-            return provider
-        logger.warning("Anthropic API key not configured")
-        return None
-    elif config.provider == "openai":
-        provider = OpenAIProvider(config)
-        if provider.is_available():
-            return provider
-        logger.warning("OpenAI API key not configured")
-        return None
-    else:
-        logger.warning("Unknown LLM provider: %s", config.provider)
-        return None
-
-
 def detect_ollama() -> bool:
-    """Auto-detect if Ollama is running locally."""
+    """Check if Ollama is running."""
     try:
-        req = urllib.request.Request("http://localhost:11434/api/tags", method="GET")
+        req = urllib.request.Request(f"{OLLAMA_URL}/api/tags", method="GET")
         with urllib.request.urlopen(req, timeout=2):
             return True
     except Exception:
         return False
+
+
+def ensure_ollama_model(model: str = DEFAULT_MODEL) -> bool:
+    """Pull the model if Ollama is running but doesn't have it."""
+    try:
+        # Check if model exists
+        req = urllib.request.Request(f"{OLLAMA_URL}/api/tags", method="GET")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            data = json.loads(resp.read())
+            models = [m.get("name", "") for m in data.get("models", [])]
+            if any(model in m for m in models):
+                return True
+
+        # Pull it
+        logger.info("Pulling Ollama model %s...", model)
+        payload = json.dumps({"name": model, "stream": False}).encode()
+        req = urllib.request.Request(
+            f"{OLLAMA_URL}/api/pull",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            resp.read()
+        return True
+    except Exception as e:
+        logger.debug("Failed to ensure model: %s", e)
+        return False
+
+
+def create_provider(config: dict | None = None) -> LLMProvider | None:
+    """Create an Ollama provider if available. Returns None if not.
+
+    config: optional dict with 'model' and/or 'ollama_url' overrides.
+    """
+    config = config or {}
+    model = config.get("model", DEFAULT_MODEL)
+    base_url = config.get("ollama_url", OLLAMA_URL)
+    provider = LLMProvider(model=model, base_url=base_url)
+    if provider.is_available():
+        logger.info("Ollama detected with model %s", provider.model)
+        return provider
+    # Try pulling the model
+    if detect_ollama():
+        if ensure_ollama_model(model):
+            provider._available = None  # reset cache
+            if provider.is_available():
+                return provider
+    return None

@@ -126,14 +126,6 @@ lurk context   # see what lurk observes right now
 
 Need to connect more tools later? `lurk connect` auto-detects and connects them.
 
-### Browser extension
-
-For ChatGPT, Claude.ai, Gemini, and Copilot in the browser:
-
-1. `lurk serve-http`
-2. Chrome → `chrome://extensions` → Developer Mode → Load Unpacked → select `extension/`
-3. A lurk button appears near any AI chat input — click to inject context
-
 ### Quick copy
 
 ```bash

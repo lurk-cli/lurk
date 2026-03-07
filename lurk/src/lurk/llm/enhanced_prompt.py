@@ -111,6 +111,26 @@ def _build_screen_prompt(model: ContextModel) -> str | None:
         for agent_tool, summary in wf.agent_contributions.items():
             meta.append(f"{agent_tool}: {summary}")
 
+    # PM context: stakeholders, artifacts, decisions
+    if hasattr(model, 'stakeholders'):
+        recent_stakeholders = model.stakeholders.get_recent(5)
+        if recent_stakeholders:
+            names = [s.name for s in recent_stakeholders]
+            meta.append(f"Recent contacts: {', '.join(names)}")
+
+    if hasattr(model, 'artifacts'):
+        recent_artifacts = model.artifacts.get_recent(3)
+        if recent_artifacts:
+            artifact_parts = [f"'{a.name}' ({a.status.value})" for a in recent_artifacts]
+            meta.append(f"Documents: {', '.join(artifact_parts)}")
+
+    if hasattr(model, 'decisions'):
+        recent_decisions = model.decisions.get_recent(hours=2, limit=3)
+        if recent_decisions:
+            dec_parts = [d.description for d in recent_decisions if d.confidence >= 0.6]
+            if dec_parts:
+                meta.append(f"Recent decisions: {'; '.join(dec_parts)}")
+
     if meta:
         parts.append("\n".join(meta))
 

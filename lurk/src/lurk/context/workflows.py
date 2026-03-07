@@ -76,6 +76,12 @@ class Workflow:
     tickets: list[str] = field(default_factory=list)
     key_decisions: list[str] = field(default_factory=list)
 
+    # Artifact lifecycle references
+    artifact_refs: list[dict] = field(default_factory=list)
+
+    # Inferred decisions from activity patterns
+    decisions_inferred: list[dict] = field(default_factory=list)
+
     # --- Prompt memory ---
     last_prompt: str = ""
     last_prompt_ts: float = 0
@@ -206,6 +212,29 @@ class Workflow:
             self.add_breadcrumb(content)
         self.updated_ts = time.time()
 
+    def add_artifact_ref(self, name: str, artifact_type: str, status: str, last_edit: float = 0) -> None:
+        """Record an artifact reference in this workflow."""
+        # Update existing or add new
+        for ref in self.artifact_refs:
+            if ref.get("name") == name:
+                ref["status"] = status
+                ref["last_edit"] = last_edit
+                return
+        self.artifact_refs.append({
+            "name": name, "type": artifact_type,
+            "status": status, "last_edit": last_edit,
+        })
+        if len(self.artifact_refs) > 20:
+            self.artifact_refs = self.artifact_refs[-20:]
+
+    def add_inferred_decision(self, description: str, confidence: float, ts: float) -> None:
+        """Record an inferred decision in this workflow."""
+        self.decisions_inferred.append({
+            "description": description, "confidence": confidence, "ts": ts,
+        })
+        if len(self.decisions_inferred) > 20:
+            self.decisions_inferred = self.decisions_inferred[-20:]
+
     # --- Context output ---
 
     def context_snapshot(self) -> dict[str, Any]:
@@ -229,6 +258,8 @@ class Workflow:
             "code_changes": self.code_changes[-5:],
             "documents": dict(list(self.documents.items())[-5:]),
             "key_decisions": self.key_decisions[-5:],
+            "artifact_refs": self.artifact_refs[-5:],
+            "decisions_inferred": self.decisions_inferred[-5:],
             "files_count": len(self.files),
             "prompt_version": self.prompt_version,
         }
@@ -282,6 +313,17 @@ class Workflow:
                 else:
                     parts.append(f"Working with \"{name}\".")
 
+        # Artifacts lifecycle
+        if self.artifact_refs:
+            for ref in self.artifact_refs[-3:]:
+                parts.append(f"\"{ref['name']}\" ({ref['type']}, {ref['status']}).")
+
+        # Inferred decisions
+        if self.decisions_inferred:
+            descs = [d["description"] for d in self.decisions_inferred[-3:] if d.get("confidence", 0) >= 0.6]
+            if descs:
+                parts.append("Inferred: " + "; ".join(descs) + ".")
+
         # Tickets
         if self.tickets:
             parts.append(f"Related tickets: {', '.join(self.tickets[-3:])}.")
@@ -333,6 +375,8 @@ class Workflow:
             "code_changes": self.code_changes[-3:],
             "documents": dict(list(self.documents.items())[-3:]),
             "key_decisions": self.key_decisions[-3:],
+            "artifact_refs": self.artifact_refs[-3:],
+            "decisions_inferred": self.decisions_inferred[-3:],
             "prompt_version": self.prompt_version,
         }
 

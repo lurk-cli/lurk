@@ -12,6 +12,9 @@ from .project import ProjectGraph
 from .session import CompactSession, SessionTracker
 from .snapshot import CurrentSnapshot, MonitorState
 from .workflows import WorkflowClusterer
+from .stakeholders import StakeholderGraph
+from .artifacts import ArtifactTracker
+from .decisions import DecisionDetector
 
 logger = logging.getLogger("lurk.context")
 
@@ -25,11 +28,17 @@ class ContextModel:
     """
 
     def __init__(self, stale_timeout: float = 600.0) -> None:
+        self._pm_activity_counts: dict[str, int] = {}
+        self._pm_mode_cache: bool | None = None
+        self._pm_mode_last_check: float = 0
         self.now = CurrentSnapshot()
         self.session_tracker = SessionTracker()
         self.projects = ProjectGraph()
         self.agents = AgentRegistry(stale_timeout=stale_timeout)
         self.workflows = WorkflowClusterer()
+        self.stakeholders = StakeholderGraph()
+        self.artifacts = ArtifactTracker()
+        self.decisions = DecisionDetector()
 
     @property
     def session(self):
@@ -39,6 +48,30 @@ class ContextModel:
     def recent_sessions(self):
         return self.session_tracker.recent_sessions
 
+    @property
+    def pm_mode_active(self) -> bool:
+        """Whether PM features should be active based on config and auto-detection."""
+        from ..config.settings import load_config
+        config = load_config()
+        mode = config.pm.mode
+        if mode == "on":
+            return True
+        if mode == "off":
+            return False
+        # Auto mode: check activity distribution
+        now = time.time()
+        if self._pm_mode_cache is not None and now - self._pm_mode_last_check < 300:
+            return self._pm_mode_cache
+        self._pm_mode_last_check = now
+        total = sum(self._pm_activity_counts.values())
+        if total < 10:
+            self._pm_mode_cache = False
+            return False
+        pm_activities = {"planning", "writing", "meeting", "communicating", "marketing", "sales", "support"}
+        pm_count = sum(self._pm_activity_counts.get(a, 0) for a in pm_activities)
+        self._pm_mode_cache = (pm_count / total) > 0.5
+        return self._pm_mode_cache
+
     def process_enriched_event(self, event: dict[str, Any]) -> None:
         """Process an enriched event and update all model components."""
         self.now.update_from_enriched(event)
@@ -46,6 +79,70 @@ class ContextModel:
         self.projects.update(event)
         self.agents.process_event(event)
         self.workflows.process_enriched_event(event)
+
+        # Track activity distribution for PM auto-detection
+        activity = event.get("activity", "")
+        if activity:
+            self._pm_activity_counts[activity] = self._pm_activity_counts.get(activity, 0) + 1
+
+        # PM features: track stakeholders from calendar, artifacts from documents, decisions from patterns
+        self._process_pm_features(event)
+
+    def _process_pm_features(self, event: dict[str, Any]) -> None:
+        """Process PM-specific features from enriched events."""
+        ts = event.get("ts", 0)
+        activity = event.get("activity", "")
+        document_name = event.get("document_name")
+        sub_activity = event.get("sub_activity", "")
+
+        # Get active workflow for linking
+        wf = self.workflows.get_active_workflow()
+        wf_id = wf.id if wf else None
+
+        # Track documents as artifacts
+        if document_name:
+            artifact = self.artifacts.track(
+                name=document_name,
+                sub_activity=sub_activity,
+                ts=ts,
+                workflow_id=wf_id,
+            )
+            # Infer status transitions
+            if sub_activity == "email_composing":
+                self.artifacts.infer_status_transition(document_name, {"shared": True, "ts": ts})
+            # Link artifact to active workflow
+            if wf:
+                wf.add_artifact_ref(
+                    document_name, artifact.artifact_type,
+                    artifact.status.value, last_edit=ts,
+                )
+
+        # Extract attendees from calendar events
+        data = event.get("data")
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except (json.JSONDecodeError, TypeError):
+                data = None
+        if isinstance(data, dict) and activity == "meeting":
+            attendees = data.get("attendees", [])
+            if isinstance(attendees, list):
+                for att in attendees:
+                    if isinstance(att, dict):
+                        name = att.get("name", "")
+                        if name:
+                            self.stakeholders.record(name, "meeting", wf_id, ts)
+
+        # Detect decisions from activity patterns (gated on PM mode)
+        if not self.pm_mode_active:
+            return
+        decision = self.decisions.process_event(event)
+        if decision:
+            if wf_id is not None:
+                decision.workflow_id = wf_id
+            # Link decision to active workflow
+            if wf:
+                wf.add_inferred_decision(decision.description, decision.confidence, ts)
 
     def process_raw_event(self, event: dict[str, Any]) -> None:
         """Process a raw event for input state and monitor updates."""
@@ -80,8 +177,13 @@ class ContextModel:
                 self.session_tracker.recent_sessions.append(CompactSession(
                     start_time=s.get("start_ts", 0),
                     end_time=s.get("end_ts", 0),
+                    duration_seconds=s.get("duration_seconds", 0),
                     projects=s.get("projects", []),
-                    summary=s.get("summary"),
+                    files_count=len(s.get("files_edited", [])),
+                    tickets=s.get("tickets", []),
+                    tools=s.get("tools", []),
+                    context_switches=s.get("context_switches", 0),
+                    focus_blocks_count=s.get("focus_blocks_count", 0),
                 ))
             if saved_sessions:
                 logger.info("Loaded %d recent sessions from DB", len(saved_sessions))
@@ -132,4 +234,7 @@ class ContextModel:
             "projects": self.projects.to_dict(),
             "agents": self.agents.to_dict(),
             "workflows": [wf.to_dict() for wf in self.workflows.list_workflows()],
+            "stakeholders": self.stakeholders.to_dict(),
+            "artifacts": self.artifacts.to_dict(),
+            "decisions": self.decisions.to_dict(),
         }

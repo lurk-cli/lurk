@@ -38,14 +38,45 @@ class ChromeParser(AppParser):
         "outlook.office.com": ("communicating", "email"),
         "figma.com": ("designing", None),
         "notion.so": ("writing", "notes"),
-        "linear.app": ("coding", "project_management"),
-        "jira.atlassian.com": ("coding", "project_management"),
+        "linear.app": ("planning", "project_management"),
+        "jira.atlassian.com": ("planning", "project_management"),
         "confluence.atlassian.com": ("researching", "documentation"),
         "twitter.com": ("browsing", "social"),
         "x.com": ("browsing", "social"),
         "reddit.com": ("browsing", "social"),
         "youtube.com": ("browsing", "video"),
         "news.ycombinator.com": ("browsing", "social"),
+        # Project Management
+        "asana.com": ("planning", "project_management"),
+        "monday.com": ("planning", "project_management"),
+        "trello.com": ("planning", "project_management"),
+        "productboard.com": ("planning", "product_strategy"),
+        "shortcut.com": ("planning", "project_management"),
+        "clickup.com": ("planning", "project_management"),
+        # Design (web)
+        "canva.com": ("designing", "graphic_design"),
+        "miro.com": ("designing", "whiteboarding"),
+        "whimsical.com": ("designing", "whiteboarding"),
+        # Data / Analytics
+        "looker.com": ("data_analysis", "dashboard"),
+        "mixpanel.com": ("data_analysis", "analytics"),
+        "amplitude.com": ("data_analysis", "analytics"),
+        "analytics.google.com": ("data_analysis", "analytics"),
+        # Marketing
+        "hubspot.com": ("marketing", "crm"),
+        "mailchimp.com": ("marketing", "email_campaign"),
+        "hootsuite.com": ("marketing", "social_media"),
+        "buffer.com": ("marketing", "social_media"),
+        "semrush.com": ("marketing", "seo"),
+        "ahrefs.com": ("marketing", "seo"),
+        # Sales
+        "salesforce.com": ("sales", "crm"),
+        "gong.io": ("sales", "call_review"),
+        "outreach.io": ("sales", "outreach"),
+        # Support
+        "zendesk.com": ("support", "ticket"),
+        "intercom.io": ("support", "chat"),
+        "freshdesk.com": ("support", "ticket"),
     }
 
     # Google Workspace title patterns for extracting document names

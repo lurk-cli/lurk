@@ -15,6 +15,11 @@ class AgentTool(str, Enum):
     GOOSE = "goose"
     OPENCLAW = "openclaw"
     COPILOT_WORKSPACE = "copilot_workspace"
+    CHATGPT = "chatgpt"
+    CLAUDE_WEB = "claude_web"
+    GEMINI = "gemini"
+    COPILOT_WEB = "copilot_web"
+    PERPLEXITY = "perplexity"
 
 
 class AgentState(str, Enum):
@@ -306,5 +311,10 @@ def _tool_display_name(tool: str) -> str:
         "goose": "Goose",
         "openclaw": "OpenClaw",
         "copilot_workspace": "Copilot Workspace",
+        "chatgpt": "ChatGPT",
+        "claude_web": "Claude (Web)",
+        "gemini": "Gemini",
+        "copilot_web": "Copilot (Web)",
+        "perplexity": "Perplexity",
     }
     return names.get(tool, tool)

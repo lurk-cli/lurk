@@ -56,8 +56,20 @@ _APP_RULES: dict[str, str] = {
     "arc": "browsing",
     "brave": "browsing",
     "edge": "browsing",
-    "linear": "coding",
-    "jira": "coding",
+    "linear": "planning",
+    "jira": "planning",
+    "final cut": "video_editing",
+    "davinci resolve": "video_editing",
+    "premiere": "video_editing",
+    "after effects": "video_editing",
+    "indesign": "designing",
+    "canva": "designing",
+    "tableau": "data_analysis",
+    "power bi": "data_analysis",
+    "asana": "planning",
+    "monday": "planning",
+    "trello": "planning",
+    "productboard": "planning",
 }
 
 
@@ -86,6 +98,15 @@ def classify_interruptibility(
 
     if activity == "coding" and input_state == "typing":
         return "low"
+
+    if activity == "video_editing" and duration_seconds > 600:
+        return "low"
+
+    if activity in ("data_analysis", "designing") and duration_seconds > 900:
+        return "low"
+
+    if activity in ("marketing", "sales", "support", "planning"):
+        return "medium"
 
     if activity in ("communicating", "browsing"):
         return "high"

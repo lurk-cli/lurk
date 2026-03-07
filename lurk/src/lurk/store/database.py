@@ -7,17 +7,23 @@ from pathlib import Path
 from typing import Any
 
 from .schema import (
+    ARTIFACTS_INDEXES,
+    ARTIFACTS_SCHEMA,
     CODE_SNAPSHOTS_INDEXES,
     CODE_SNAPSHOTS_SCHEMA,
     CAPTURES_FTS,
     CAPTURES_INDEXES,
     CAPTURES_SCHEMA,
+    DECISIONS_INDEXES,
+    DECISIONS_SCHEMA,
     ENRICHED_EVENTS_INDEXES,
     ENRICHED_EVENTS_SCHEMA,
     RAW_EVENTS_INDEXES,
     RAW_EVENTS_SCHEMA,
     SESSIONS_INDEXES,
     SESSIONS_SCHEMA,
+    STAKEHOLDERS_INDEXES,
+    STAKEHOLDERS_SCHEMA,
     WORKFLOWS_INDEXES,
     WORKFLOWS_SCHEMA,
 )
@@ -58,6 +64,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute(idx)
     conn.execute(CODE_SNAPSHOTS_SCHEMA)
     for idx in CODE_SNAPSHOTS_INDEXES:
+        conn.execute(idx)
+    conn.execute(STAKEHOLDERS_SCHEMA)
+    for idx in STAKEHOLDERS_INDEXES:
+        conn.execute(idx)
+    conn.execute(ARTIFACTS_SCHEMA)
+    for idx in ARTIFACTS_INDEXES:
+        conn.execute(idx)
+    conn.execute(DECISIONS_SCHEMA)
+    for idx in DECISIONS_INDEXES:
         conn.execute(idx)
     _migrate_agent_columns(conn)
     conn.commit()

@@ -89,6 +89,24 @@ def generate_prompt(
     if agents and _fits(parts, agents, max_chars):
         parts.append(agents)
 
+    # PM-specific sections (for pm, writing, general tools)
+    if tool in ("pm", "writing", "general"):
+        meeting = _describe_meeting_context(model)
+        if meeting and _fits(parts, meeting, max_chars):
+            parts.append(meeting)
+
+        stakeholders = _describe_stakeholders(model)
+        if stakeholders and _fits(parts, stakeholders, max_chars):
+            parts.append(stakeholders)
+
+        artifacts = _describe_artifacts_lifecycle(model)
+        if artifacts and _fits(parts, artifacts, max_chars):
+            parts.append(artifacts)
+
+        pm_workflow = _describe_pm_workflow(model)
+        if pm_workflow and _fits(parts, pm_workflow, max_chars):
+            parts.append(pm_workflow)
+
     return " ".join(parts)
 
 
@@ -347,3 +365,53 @@ def _describe_agent_work() -> str | None:
         return None
 
     return summary[:600]
+
+
+def _describe_meeting_context(model) -> str | None:
+    """Current or upcoming meeting context."""
+    # Check calendar data from session breadcrumbs
+    session = model.session
+    for crumb in reversed(session.breadcrumbs[-5:]):
+        if "meeting" in crumb.description.lower() or "follow-up from meeting" in crumb.description:
+            return crumb.description.capitalize() + "."
+    return None
+
+
+def _describe_stakeholders(model) -> str | None:
+    """Recently interacted people."""
+    if not hasattr(model, 'stakeholders'):
+        return None
+    recent = model.stakeholders.get_recent(5)
+    if not recent:
+        return None
+    parts = []
+    for s in recent:
+        ctx = ", ".join(s.contexts[:2]) if s.contexts else "interaction"
+        parts.append(f"{s.name} ({ctx})")
+    return "Recently interacted with: " + ", ".join(parts) + "."
+
+
+def _describe_artifacts_lifecycle(model) -> str | None:
+    """Documents and their lifecycle status."""
+    if not hasattr(model, 'artifacts'):
+        return None
+    recent = model.artifacts.get_recent(5)
+    if not recent:
+        return None
+    parts = []
+    for a in recent:
+        parts.append(f"'{a.name}' ({a.status.value})")
+    return "Working on: " + ", ".join(parts) + "."
+
+
+def _describe_pm_workflow(model) -> str | None:
+    """PM-specific workflow context — decisions + artifacts."""
+    if not hasattr(model, 'decisions'):
+        return None
+    decisions = model.decisions.get_recent(hours=4, limit=3)
+    if not decisions:
+        return None
+    descs = [d.description for d in decisions if d.confidence >= 0.6]
+    if not descs:
+        return None
+    return "Recent decisions: " + "; ".join(descs) + "."

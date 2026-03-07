@@ -23,6 +23,10 @@ from .jetbrains import JetBrainsParser
 from .mail import MailParser
 from .zoom import ZoomParser
 from .documents import DocumentsParser
+from .sketch import SketchParser
+from .video_editors import VideoEditorsParser
+from .adobe_creative import AdobeCreativeParser
+from .tableau import TableauParser
 from .fallback import FallbackParser
 
 logger = logging.getLogger("lurk.parsers")
@@ -50,6 +54,10 @@ class ParserRegistry:
             MailParser(),
             ZoomParser(),
             DocumentsParser(),
+            SketchParser(),
+            VideoEditorsParser(),
+            AdobeCreativeParser(),
+            TableauParser(),
             FallbackParser(),  # Always last — matches everything
         ]
         self.metrics = ParserMetrics()

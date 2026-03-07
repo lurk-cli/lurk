@@ -25,7 +25,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger("lurk.observers.screenshot")
 
@@ -36,8 +36,12 @@ SNAPSHOT_META = SNAPSHOT_DIR / "latest.json"
 MIN_PROCESS_INTERVAL = 8.0  # seconds
 
 
-def _run_ocr(image_path: str) -> list[str]:
-    """Run macOS Vision OCR on an image. Returns list of recognized text lines."""
+def _run_ocr_with_boxes(image_path: str) -> list[tuple[str, float, float, float, float]]:
+    """Run macOS Vision OCR, returning text with normalized bounding boxes.
+
+    Returns list of (text, x, y, w, h) where coordinates are normalized [0,1],
+    bottom-left origin (as returned by Vision framework).
+    """
     try:
         import objc
         from Quartz import (
@@ -55,7 +59,7 @@ def _run_ocr(image_path: str) -> list[str]:
         if cg_image is None:
             return []
 
-        results: list[str] = []
+        results: list[tuple[str, float, float, float, float]] = []
 
         def completion(request, error):
             if error:
@@ -68,7 +72,14 @@ def _run_ocr(image_path: str) -> list[str]:
                 if candidates and len(candidates) > 0:
                     text = candidates[0].string()
                     if text and text.strip():
-                        results.append(text.strip())
+                        bbox = obs.boundingBox()
+                        results.append((
+                            text.strip(),
+                            bbox.origin.x,
+                            bbox.origin.y,
+                            bbox.size.width,
+                            bbox.size.height,
+                        ))
 
         request = Vision.VNRecognizeTextRequest.alloc().initWithCompletionHandler_(completion)
         request.setRecognitionLevel_(1)  # accurate
@@ -83,10 +94,19 @@ def _run_ocr(image_path: str) -> list[str]:
 
     except ImportError:
         logger.debug("Vision/Quartz not available — trying tesseract fallback")
-        return _run_ocr_fallback(image_path)
+        return []
     except Exception:
         logger.debug("OCR failed", exc_info=True)
         return []
+
+
+def _run_ocr(image_path: str) -> list[str]:
+    """Run macOS Vision OCR on an image. Returns list of recognized text lines."""
+    results = _run_ocr_with_boxes(image_path)
+    if results:
+        return [text for text, *_ in results]
+    # Fall back to shortcuts-based OCR if Vision is unavailable
+    return _run_ocr_fallback(image_path)
 
 
 def _run_ocr_fallback(image_path: str) -> list[str]:
@@ -105,6 +125,62 @@ def _run_ocr_fallback(image_path: str) -> list[str]:
     return []
 
 
+def _word_set(text: str) -> set[str]:
+    """Normalize text to lowercase alphanumeric word set for OCR-noise-tolerant comparison."""
+    return {w.lower() for w in re.findall(r'[a-zA-Z0-9]+', text) if len(w) > 1}
+
+
+def _region_similarity(old_text: str, new_text: str) -> float:
+    """Word-level Jaccard similarity between two region texts."""
+    old_words = _word_set(old_text)
+    new_words = _word_set(new_text)
+    if not old_words and not new_words:
+        return 1.0
+    if not old_words or not new_words:
+        return 0.0
+    return len(old_words & new_words) / len(old_words | new_words)
+
+
+def _classify_regions(
+    prev_regions: list, curr_regions: list, input_state: str
+) -> dict[str, str]:
+    """Classify each current region as active/output/reference by comparing to previous frame.
+
+    - active: user is typing AND this region changed → cursor is here
+    - output: region changed but user isn't typing → automated output
+    - reference: region unchanged → context material
+
+    Threshold: 0.8 similarity (20%+ word change = "changed").
+    """
+    # Build lookup of previous regions by label
+    prev_by_label: dict[str, str] = {}
+    for r in prev_regions:
+        prev_by_label[r.label] = r.text
+
+    changes: dict[str, str] = {}
+    is_typing = input_state == "typing"
+
+    for r in curr_regions:
+        prev_text = prev_by_label.get(r.label)
+        if prev_text is None:
+            # New region (app switch, layout change) → treat as output
+            changes[r.label] = "output"
+            continue
+
+        sim = _region_similarity(prev_text, r.text)
+        if sim >= 0.8:
+            # Unchanged
+            changes[r.label] = "reference"
+        elif is_typing:
+            # Changed + typing → active (cursor is here)
+            changes[r.label] = "active"
+        else:
+            # Changed + not typing → automated output
+            changes[r.label] = "output"
+
+    return changes
+
+
 # ---------------------------------------------------------------------------
 # Screen buffer — holds raw OCR frames for direct LLM consumption
 # ---------------------------------------------------------------------------
@@ -117,6 +193,9 @@ class ScreenFrame:
     title: str  # window title from metadata
     text: str   # full OCR text, unfiltered
     text_hash: int  # for dedup
+    regions: list | None = None  # list[ScreenRegion] if spatial OCR available
+    input_state: str = "idle"                     # typing/reading/idle
+    region_changes: dict[str, str] | None = None  # {label: "active"|"output"|"reference"}
 
 
 # Module-level singleton buffer so all consumers share the same frames
@@ -144,7 +223,7 @@ class ScreenBuffer:
     def __init__(self) -> None:
         self._frames: list[ScreenFrame] = []
 
-    def add(self, app: str, title: str, lines: list[str]) -> ScreenFrame | None:
+    def add(self, app: str, title: str, lines: list[str], regions: list | None = None, input_state: str = "idle") -> ScreenFrame | None:
         """Add a new OCR capture to the buffer. Returns frame if added, None if deduped."""
         text = "\n".join(lines)
         text_hash = hash(text[:500])  # hash on first 500 chars for speed
@@ -153,12 +232,19 @@ class ScreenBuffer:
         if self._frames and self._frames[-1].text_hash == text_hash:
             return None
 
+        region_changes = None
+        if regions and self._frames and self._frames[-1].regions:
+            region_changes = _classify_regions(self._frames[-1].regions, regions, input_state)
+
         frame = ScreenFrame(
             ts=time.time(),
             app=app,
             title=title,
             text=text,
             text_hash=text_hash,
+            regions=regions,
+            input_state=input_state,
+            region_changes=region_changes,
         )
         self._frames.append(frame)
 
@@ -241,7 +327,11 @@ class ScreenBuffer:
             else:
                 when = f"{age // 60}m ago"
 
-            header = f"[{when}] {frame.app}"
+            # Show input state in header when not idle
+            when_parts = [when]
+            if frame.input_state and frame.input_state != "idle":
+                when_parts.append(frame.input_state)
+            header = f"[{', '.join(when_parts)}] {frame.app}"
             if frame.title and frame.title != frame.app:
                 header += f" — {frame.title}"
 
@@ -250,7 +340,16 @@ class ScreenBuffer:
             if remaining < 100:
                 break
 
-            text = _truncate_screen_text(frame.text, max_chars=remaining)
+            # Use spatial regions if available, otherwise flat text
+            if frame.regions:
+                if frame.region_changes:
+                    text = _format_regions_weighted(frame.regions, frame.region_changes, remaining)
+                else:
+                    from ..parsers.spatial import format_regions
+                    text = format_regions(frame.regions)
+                    text = text[:remaining] if len(text) > remaining else text
+            else:
+                text = _truncate_screen_text(frame.text, max_chars=remaining)
             section = f"{header}\n{text}"
             parts.append(section)
             chars_used += len(section)
@@ -275,6 +374,52 @@ def _truncate_screen_text(text: str, max_chars: int = 1500) -> str:
         chars += len(line) + 1
 
     return "\n".join(result)
+
+
+def _format_regions_weighted(
+    regions: list, region_changes: dict[str, str], max_chars: int
+) -> str:
+    """Format regions with character budget weighted by classification.
+
+    Budget allocation: active ~60%, output ~25%, reference ~15%.
+    Redistributes budget when a classification has no regions.
+    No explicit labels — just more text for the important region.
+    """
+    # Group regions by classification
+    grouped: dict[str, list] = {"active": [], "output": [], "reference": []}
+    for r in regions:
+        cls = region_changes.get(r.label, "reference")
+        grouped[cls].append(r)
+
+    # Base budget ratios
+    ratios = {"active": 0.60, "output": 0.25, "reference": 0.15}
+
+    # Redistribute budget from empty classifications
+    empty_budget = sum(ratios[k] for k in ratios if not grouped[k])
+    non_empty = [k for k in ratios if grouped[k]]
+    if non_empty and empty_budget > 0:
+        bonus = empty_budget / len(non_empty)
+        ratios = {k: (ratios[k] + bonus if grouped[k] else 0) for k in ratios}
+
+    # Allocate character budgets
+    budgets = {k: int(max_chars * ratios[k]) for k in ratios}
+
+    # Format each group
+    parts: list[str] = []
+    for cls in ("active", "output", "reference"):
+        budget = budgets[cls]
+        for r in grouped[cls]:
+            text = r.text.strip()
+            if not text:
+                continue
+            # Split budget evenly among regions in same classification
+            n_in_class = len(grouped[cls])
+            region_budget = budget // max(1, n_in_class)
+            if len(text) > region_budget:
+                text = text[:region_budget]
+            parts.append(f"## {r.label}\n{text}")
+
+    return "\n\n".join(parts) if parts else ""
 
 
 # ---------------------------------------------------------------------------
@@ -385,10 +530,11 @@ def _extract_context_from_text(lines: list[str], app: str) -> dict[str, Any]:
 class ScreenshotObserver:
     """Reads daemon screenshots, stores raw OCR in buffer, produces WorkflowUpdates."""
 
-    def __init__(self) -> None:
+    def __init__(self, input_state_fn: Callable[[], str] | None = None) -> None:
         self._last_mtime: float = 0
         self._last_process_time: float = 0
         self._buffer = get_screen_buffer()
+        self._input_state_fn = input_state_fn or (lambda: "idle")
 
     def check(self) -> list:
         """WorkflowObserver protocol — capture new screenshot, return updates."""
@@ -412,6 +558,8 @@ class ScreenshotObserver:
         self._last_mtime = mtime
         self._last_process_time = now
 
+        input_state = self._input_state_fn()
+
         # Read metadata
         app = ""
         title = ""
@@ -423,17 +571,31 @@ class ScreenshotObserver:
             except Exception:
                 pass
 
-        # Run OCR
-        lines = _run_ocr(str(SNAPSHOT_IMAGE))
-        if not lines:
-            return []
+        # Run OCR with bounding boxes for spatial clustering
+        ocr_results = _run_ocr_with_boxes(str(SNAPSHOT_IMAGE))
+        if not ocr_results:
+            # Try fallback (no bounding boxes)
+            lines = _run_ocr_fallback(str(SNAPSHOT_IMAGE))
+            if not lines:
+                return []
+            frame = self._buffer.add(app, title, lines, input_state=input_state)
+            if frame is None:
+                return []
+            logger.info("Screen capture (flat): %s — %d lines", app, len(lines))
+        else:
+            from ..parsers.spatial import TextBlock, cluster_into_regions
+            lines = [text for text, *_ in ocr_results]
+            blocks = [
+                TextBlock(text=text, x=x, y=y, w=w, h=h)
+                for text, x, y, w, h in ocr_results
+            ]
+            regions = cluster_into_regions(blocks, app=app)
 
-        # Store raw text in buffer (deduplicates internally)
-        frame = self._buffer.add(app, title, lines)
-        if frame is None:
-            return []  # screen unchanged
-
-        logger.info("Screen capture: %s — %d lines", app, len(lines))
+            # Store in buffer with regions
+            frame = self._buffer.add(app, title, lines, regions=regions, input_state=input_state)
+            if frame is None:
+                return []  # screen unchanged
+            logger.info("Screen capture: %s — %d lines, %d regions", app, len(lines), len(regions))
 
         # Still produce WorkflowUpdates for workflow clustering
         # Use lightweight regex extraction just for keywords

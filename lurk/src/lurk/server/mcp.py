@@ -7,13 +7,18 @@ from typing import Any
 
 from ..context.model import ContextModel
 from ..enrichment.pipeline import EnrichmentPipeline
-from ..llm.config import load_llm_config
 from ..llm.enhanced_prompt import generate_enhanced_prompt
 from ..llm.provider import LLMProvider, create_provider
 from ..server.prompt import generate_prompt
 from ..store.database import ensure_schema, get_connection
 
 logger = logging.getLogger("lurk.mcp")
+
+_AGENT_BREADCRUMB_KEYWORDS = ("asking", "using", "claude", "chatgpt", "gemini", "copilot", "built", "perplexity")
+
+def _filter_agent_breadcrumbs(breadcrumbs: list[str]) -> list[str]:
+    """Filter breadcrumbs to only agent-related entries."""
+    return [b for b in breadcrumbs if any(kw in b.lower() for kw in _AGENT_BREADCRUMB_KEYWORDS)]
 
 # Global context model — initialized on server start
 _model: ContextModel | None = None
@@ -26,11 +31,11 @@ def _get_model() -> ContextModel:
     if _model is None:
         _model = ContextModel()
         _pipeline = EnrichmentPipeline()
-        # Initialize LLM provider (optional)
-        llm_config = load_llm_config()
-        _llm_provider = create_provider(llm_config)
+        # Initialize LLM provider (optional — Ollama auto-detected)
+        from ..llm.config import load_llm_config
+        _llm_provider = create_provider(load_llm_config())
         if _llm_provider:
-            logger.info("LLM provider: %s (%s)", _llm_provider.name, llm_config.model)
+            logger.info("LLM provider: %s (%s)", _llm_provider.name, _llm_provider.model)
         # Load recent state from DB
         conn = get_connection()
         try:
@@ -97,11 +102,11 @@ def create_mcp_server():
         return _get_model().session.to_dict()
 
     @mcp.tool()
-    def get_context_prompt(max_tokens: int = 500) -> str:
-        """What the user is working on right now — raw screen content, project metadata, and activity trail. This is captured from their actual screen via OCR. Inject into your system prompt for context-aware responses."""
+    def get_context_prompt(max_tokens: int = 500, tool: str = "coding") -> str:
+        """What the user is working on right now — raw screen content, project metadata, and activity trail. This is captured from their actual screen via OCR. Inject into your system prompt for context-aware responses. Use tool='pm' for PM-focused context."""
         _refresh()
         model = _get_model()
-        return generate_enhanced_prompt(model, _llm_provider, max_tokens=max_tokens)
+        return generate_enhanced_prompt(model, _llm_provider, max_tokens=max_tokens, tool=tool)
 
     @mcp.tool()
     def get_project_context(project_name: str = "") -> dict[str, Any]:
@@ -252,6 +257,58 @@ def create_mcp_server():
                 pass
 
         return wf.generate_prompt()
+
+    @mcp.tool()
+    def get_stakeholders(workflow_id: int = 0) -> dict[str, Any]:
+        """Get people the user has recently interacted with — meeting attendees, email recipients, Slack contacts. Optionally filter by workflow."""
+        _refresh()
+        model = _get_model()
+        if workflow_id > 0:
+            stakeholders = model.stakeholders.get_for_workflow(workflow_id)
+            return {"workflow_id": workflow_id, "stakeholders": [s.to_dict() for s in stakeholders]}
+        return model.stakeholders.to_dict()
+
+    @mcp.tool()
+    def get_artifacts(workflow_id: int = 0) -> dict[str, Any]:
+        """Get documents the user is working on and their lifecycle status (draft, in_review, approved). Optionally filter by workflow."""
+        _refresh()
+        model = _get_model()
+        if workflow_id > 0:
+            artifacts = model.artifacts.get_for_workflow(workflow_id)
+            return {"workflow_id": workflow_id, "artifacts": [a.to_dict() for a in artifacts]}
+        return model.artifacts.to_dict()
+
+    @mcp.tool()
+    def get_decisions(hours: float = 4, workflow_id: int = 0) -> dict[str, Any]:
+        """Get decisions inferred from activity patterns — ticket updates after discussions, document edits after meetings, triage sessions. Optionally filter by workflow."""
+        _refresh()
+        model = _get_model()
+        if workflow_id > 0:
+            decisions = model.decisions.get_for_workflow(workflow_id)
+            return {"workflow_id": workflow_id, "decisions": [d.to_dict() for d in decisions]}
+        recent = model.decisions.get_recent(hours=hours)
+        return {"total": len(recent), "recent": [d.to_dict() for d in recent]}
+
+    @mcp.tool()
+    def get_workflow_agent_history(workflow_id: int = 0) -> dict[str, Any]:
+        """Get what each AI tool (code and web-based) contributed to a workflow. Shows agent contributions, AI chat sessions, and code changes. Enables continuity when switching between ChatGPT, Claude, Cursor."""
+        _refresh()
+        model = _get_model()
+        if workflow_id > 0:
+            wf = model.workflows.get_workflow(workflow_id)
+        else:
+            wf = model.workflows.get_active_workflow()
+        if not wf:
+            return {"error": "No active workflow found."}
+        return {
+            "workflow_id": wf.id,
+            "label": wf.label,
+            "tools": wf.tools,
+            "agent_contributions": wf.agent_contributions,
+            "breadcrumbs": _filter_agent_breadcrumbs(wf.breadcrumbs[-20:]),
+            "code_changes": wf.code_changes[-10:],
+            "documents": dict(list(wf.documents.items())[-5:]),
+        }
 
     return mcp
 

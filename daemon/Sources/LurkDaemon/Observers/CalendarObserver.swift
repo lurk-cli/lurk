@@ -64,6 +64,38 @@ final class CalendarObserver: Observer {
             if event.startDate <= now && event.endDate >= now {
                 info["in_progress"] = true
             }
+            // Attendee extraction for stakeholder tracking
+            if let attendees = event.attendees {
+                info["attendee_count"] = attendees.count
+                info["attendees"] = attendees.map { participant in
+                    var attendee: [String: Any] = [
+                        "name": participant.name ?? participant.url.absoluteString,
+                    ]
+                    switch participant.participantRole {
+                    case .required: attendee["role"] = "required"
+                    case .optional: attendee["role"] = "optional"
+                    case .chair: attendee["role"] = "chair"
+                    case .nonParticipant: attendee["role"] = "non_participant"
+                    @unknown default: attendee["role"] = "unknown"
+                    }
+                    switch participant.participantStatus {
+                    case .accepted: attendee["status"] = "accepted"
+                    case .declined: attendee["status"] = "declined"
+                    case .tentative: attendee["status"] = "tentative"
+                    case .pending: attendee["status"] = "pending"
+                    @unknown default: attendee["status"] = "unknown"
+                    }
+                    return attendee
+                }
+            }
+            // Meeting description/agenda
+            if let notes = event.notes, !notes.isEmpty {
+                info["description"] = String(notes.prefix(300))
+            }
+            // Location (room name or video link)
+            if let location = event.location, !location.isEmpty {
+                info["location"] = location
+            }
             return info
         }
 

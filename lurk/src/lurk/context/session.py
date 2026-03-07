@@ -225,6 +225,9 @@ class SessionTracker:
         self._last_research_start: float = 0
         self._last_research_topic: str | None = None
         self._last_research_domain: str | None = None
+        self._last_meeting_title: str | None = None
+        self._last_meeting_end_ts: float = 0
+        self._post_meeting_window: float = 900  # 15 minutes
 
     def process_event(self, event: dict) -> None:
         """Process an enriched event and update session state."""
@@ -296,6 +299,19 @@ class SessionTracker:
                                    event.get("sub_activity"))
         if crumb:
             self.current_session.add_breadcrumb(ts, crumb)
+
+        # Post-meeting linking — detect follow-up activity after meetings
+        if activity == "meeting":
+            self._last_meeting_title = topic or event.get("document_name") or "meeting"
+            self._last_meeting_end_ts = ts
+        elif (
+            self._last_meeting_title
+            and activity in ("writing", "planning", "communicating", "coding")
+            and ts - self._last_meeting_end_ts < self._post_meeting_window
+        ):
+            follow_up = f"follow-up from meeting '{self._last_meeting_title}'"
+            self.current_session.add_breadcrumb(ts, follow_up)
+            self._last_meeting_title = None
 
         self._last_app = app
         self._last_project = project
