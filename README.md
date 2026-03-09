@@ -35,7 +35,7 @@ People involved: Sarah Chen (API design), Mike (will review)
 [What I need help with: ]
 ```
 
-You open claude.ai. Or gemini.com. Or ChatGPT. And you spend 5 minutes explaining what you're working on before you can ask your actual question.
+You open claude, gemini, or ChatGPT and you spend 5 minutes explaining what you're working on before you can ask your actual question.
 
 lurk fixes that. It watches your desktop — VS Code, Chrome, Slack, Notion, Figma, Terminal, and 30+ apps — and builds a running understanding of what you're working on. When you need AI help, `lurk context` gives you a ready-to-paste prompt with full context. Or just copy it: `lurk context -c`.
 
@@ -136,28 +136,28 @@ lurk                       # lurk auto-detects Ollama
 
 ### What lurk captures
 
-| Signal | Source | Example |
-|--------|--------|---------|
-| Active app + window | macOS APIs | `auth-middleware.ts — api — VS Code` |
-| Screen content | OCR via Vision | Code, chat messages, document text |
-| Conversations | Messaging OCR | Who said what in Slack, WhatsApp, Teams |
-| Document structure | Document OCR | Headings, key content, editing position |
-| Input state | Event taps | Typing, idle, mouse-only |
-| Code changes | Git watcher | Actual diffs, branches, uncommitted work |
-| Agent sessions | Session watcher | Claude Code conversation history |
-| Page content | Browser extension | Viewport text, selections |
+| Signal              | Source            | Example                                  |
+| ------------------- | ----------------- | ---------------------------------------- |
+| Active app + window | macOS APIs        | `auth-middleware.ts — api — VS Code`     |
+| Screen content      | OCR via Vision    | Code, chat messages, document text       |
+| Conversations       | Messaging OCR     | Who said what in Slack, WhatsApp, Teams  |
+| Document structure  | Document OCR      | Headings, key content, editing position  |
+| Input state         | Event taps        | Typing, idle, mouse-only                 |
+| Code changes        | Git watcher       | Actual diffs, branches, uncommitted work |
+| Agent sessions      | Session watcher   | Claude Code conversation history         |
+| Page content        | Browser extension | Viewport text, selections                |
 
 ### What lurk understands
 
-| Insight | How |
-|---------|-----|
-| What you're working on | Workstream clustering via local LLM |
-| Key decisions made | Extracted from conversations and agent sessions |
-| People involved | Names from chats, meetings, documents |
-| Files and projects | Parsed from editors, terminals, git |
-| Activity type | Coding, researching, communicating, designing, writing |
-| Research trail | Docs pages, Stack Overflow, GitHub issues visited |
-| AI agent states | Claude Code working, Cursor generating, ChatGPT active |
+| Insight                | How                                                    |
+| ---------------------- | ------------------------------------------------------ |
+| What you're working on | Workstream clustering via local LLM                    |
+| Key decisions made     | Extracted from conversations and agent sessions        |
+| People involved        | Names from chats, meetings, documents                  |
+| Files and projects     | Parsed from editors, terminals, git                    |
+| Activity type          | Coding, researching, communicating, designing, writing |
+| Research trail         | Docs pages, Stack Overflow, GitHub issues visited      |
+| AI agent states        | Claude Code working, Cursor generating, ChatGPT active |
 
 ---
 
@@ -194,23 +194,23 @@ lurk purge            Clean up old data
 
 When connected via MCP, AI agents get direct access to your context:
 
-| Tool | What it does |
-|------|-------------|
-| `get_cold_start_prompt` | Ready-to-use prompt with full workstream context |
-| `get_context_prompt` | Natural language briefing — inject into system prompts |
-| `get_current_context` | What the user is doing right now |
-| `get_session_context` | Full work session — projects, files, research, focus blocks |
-| `get_workstreams` | All active workstreams with goals, state, and artifacts |
-| `get_workflows` | Detected workflows with topics, tools, and context |
-| `get_workflow_context` | Full accumulated context for a specific workflow |
-| `get_active_workflow_prompt` | Synthesized prompt from the active workflow |
-| `add_workflow_context` | Feed back decisions, findings, blockers, summaries |
-| `get_recent_code_changes` | Actual diffs of what agents wrote |
-| `get_code_changes_summary` | Readable summary of recent code changes |
-| `get_agent_status` | All tracked AI agent sessions and states |
-| `get_attention_queue` | Agents needing human attention, priority-sorted |
-| `get_agent_context_for_handoff` | Context briefing for agent-to-agent handoff |
-| `get_project_context` | Deep context for a specific project |
+| Tool                            | What it does                                                |
+| ------------------------------- | ----------------------------------------------------------- |
+| `get_cold_start_prompt`         | Ready-to-use prompt with full workstream context            |
+| `get_context_prompt`            | Natural language briefing — inject into system prompts      |
+| `get_current_context`           | What the user is doing right now                            |
+| `get_session_context`           | Full work session — projects, files, research, focus blocks |
+| `get_workstreams`               | All active workstreams with goals, state, and artifacts     |
+| `get_workflows`                 | Detected workflows with topics, tools, and context          |
+| `get_workflow_context`          | Full accumulated context for a specific workflow            |
+| `get_active_workflow_prompt`    | Synthesized prompt from the active workflow                 |
+| `add_workflow_context`          | Feed back decisions, findings, blockers, summaries          |
+| `get_recent_code_changes`       | Actual diffs of what agents wrote                           |
+| `get_code_changes_summary`      | Readable summary of recent code changes                     |
+| `get_agent_status`              | All tracked AI agent sessions and states                    |
+| `get_attention_queue`           | Agents needing human attention, priority-sorted             |
+| `get_agent_context_for_handoff` | Context briefing for agent-to-agent handoff                 |
+| `get_project_context`           | Deep context for a specific project                         |
 
 ### The feedback loop
 
@@ -224,13 +224,13 @@ add_workflow_context(type="decision", content="JWT with RS256 — API is statele
 # "Key decisions: JWT with RS256 for auth."
 ```
 
-| Type | Purpose |
-|------|---------|
-| `decision` | Architectural or design choice made |
-| `finding` | Research discovery or technical insight |
-| `blocker` | Something blocking progress |
-| `summary` | What was just accomplished |
-| `question` | Open question for follow-up |
+| Type       | Purpose                                 |
+| ---------- | --------------------------------------- |
+| `decision` | Architectural or design choice made     |
+| `finding`  | Research discovery or technical insight |
+| `blocker`  | Something blocking progress             |
+| `summary`  | What was just accomplished              |
+| `question` | Open question for follow-up             |
 
 ---
 
@@ -281,16 +281,16 @@ Built-in observers: **git watcher** (actual diffs), **session watcher** (Claude 
 
 lurk is **100% local**. Everything runs on your machine. Nothing is sent anywhere.
 
-| | |
-|---|---|
-| **Storage** | SQLite at `~/.lurk/store.db` — on your disk, nowhere else |
-| **Network** | Zero outbound connections (unless you opt into cloud LLM prompts) |
-| **Telemetry** | None. No analytics, no crash reports, no usage tracking |
-| **Accounts** | None. No sign-up, no login, no cloud dashboard |
-| **Servers** | MCP and HTTP run on `localhost` only — not exposed to the network |
-| **Exclusions** | Block sensitive apps and title patterns: `["Messages", "*bank*"]` |
-| **Controls** | `lurk pause` to stop instantly, `lurk delete --all` to wipe everything |
-| **Sanitization** | Emails, auth tokens, and identifiers stripped before storage |
+|                  |                                                                        |
+| ---------------- | ---------------------------------------------------------------------- |
+| **Storage**      | SQLite at `~/.lurk/store.db` — on your disk, nowhere else              |
+| **Network**      | Zero outbound connections (unless you opt into cloud LLM prompts)      |
+| **Telemetry**    | None. No analytics, no crash reports, no usage tracking                |
+| **Accounts**     | None. No sign-up, no login, no cloud dashboard                         |
+| **Servers**      | MCP and HTTP run on `localhost` only — not exposed to the network      |
+| **Exclusions**   | Block sensitive apps and title patterns: `["Messages", "*bank*"]`      |
+| **Controls**     | `lurk pause` to stop instantly, `lurk delete --all` to wipe everything |
+| **Sanitization** | Emails, auth tokens, and identifiers stripped before storage           |
 
 You own your context. You can inspect it (`lurk log`), export it, delete it, or nuke it. There is no "other copy."
 
