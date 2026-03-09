@@ -37,12 +37,9 @@
   },
   "homepage": "https://github.com/lurk-cli/lurk#readme",
   "engines": {
-    "node": ">=24"
+    "node": ">=18"
   },
   "os": [
     "darwin"
-  ],
-  "dependencies": {
-    "lurk-cli": "^0.2.0"
-  }
+  ]
 }
