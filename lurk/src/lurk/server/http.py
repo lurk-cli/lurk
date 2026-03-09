@@ -236,6 +236,8 @@ class ContextServer:
             wf.add_document(name, desc)
         for f in update.files:
             wf.add_file(f)
+        for name, context in update.stakeholders:
+            self.model.stakeholders.record(name, context, workflow_id)
         self.clusterer._save_workflow(wf, conn)
 
     def start(self) -> None:
@@ -317,6 +319,10 @@ class ContextServer:
             self.ai_chat_observer.process_input(data)
             return
 
+        # Cap large text fields to prevent memory spikes
+        for field in ("page_content", "viewport_text"):
+            if field in data and isinstance(data[field], str) and len(data[field]) > 10000:
+                data[field] = data[field][:10000]
         with self._extension_lock:
             self._extension_context = data
             logger.debug("Extension context: %s %s", data.get("type"), data.get("document_name", ""))
@@ -407,6 +413,7 @@ class ContextServer:
     def _enrichment_loop(self) -> None:
         """Background loop that enriches events and updates the model."""
         logger.info("Enrichment loop started")
+        _retention_counter = 0
         while not self._stop_event.is_set():
             try:
                 count = self.pipeline.run_once()
@@ -424,6 +431,24 @@ class ContextServer:
                         conn.close()
             except Exception:
                 logger.exception("Error in enrichment loop")
+
+            # Run retention cleanup every ~1200 cycles (~1 hour at 3s intervals)
+            _retention_counter += 1
+            if _retention_counter >= 1200:
+                _retention_counter = 0
+                try:
+                    from ..store.database import run_retention
+                    conn = get_connection()
+                    try:
+                        deleted = run_retention(conn)
+                        total = sum(deleted.values())
+                        if total > 0:
+                            logger.info("Retention cleanup: %s", deleted)
+                    finally:
+                        conn.close()
+                except Exception:
+                    logger.exception("Error in retention cleanup")
+
             self._stop_event.wait(timeout=3.0)
 
     def _git_watch_loop(self) -> None:

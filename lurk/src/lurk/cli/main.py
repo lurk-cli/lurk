@@ -84,9 +84,6 @@ def _smart_start():
     # Step 5: Auto-connect any detected AI tools (silent, no prompts)
     _auto_connect_tools()
 
-    # Step 6: Check accessibility (just open settings if needed, don't block)
-    _check_accessibility_silent()
-
     console.print()
     console.print("[bold green]lurk is running.[/bold green]")
     console.print("  Context API at [cyan]http://localhost:4141[/cyan]")
@@ -309,6 +306,63 @@ def stop():
         console.print("[bold]lurk stopped.[/bold]")
     else:
         console.print("[yellow]lurk is not running.[/yellow]")
+
+
+@app.command()
+def reset(
+    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation prompt"),
+):
+    """Reset lurk — clear all context, events, and workflows. Starts fresh."""
+    if not force:
+        confirm = typer.confirm("This will stop lurk, delete the database and all cached state. Continue?")
+        if not confirm:
+            raise typer.Abort()
+
+    # Stop everything first
+    for pidfile, name in [(PID_FILE, "daemon"), (ENGINE_PID_FILE, "engine")]:
+        if pidfile.exists():
+            try:
+                pid = int(pidfile.read_text().strip())
+                os.kill(pid, signal.SIGTERM)
+                console.print(f"  [green]✓[/green] Stopped {name}")
+            except (ProcessLookupError, ValueError, OSError):
+                pass
+            pidfile.unlink(missing_ok=True)
+
+    # Also kill any lurk processes on port 4141
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["lsof", "-ti", ":4141"], capture_output=True, text=True,
+        )
+        if result.stdout.strip():
+            for pid_str in result.stdout.strip().split("\n"):
+                try:
+                    os.kill(int(pid_str.strip()), signal.SIGTERM)
+                except (ProcessLookupError, ValueError, OSError):
+                    pass
+    except Exception:
+        pass
+
+    # Delete database
+    db_path = LURK_DIR / "store.db"
+    for suffix in ("", "-wal", "-shm"):
+        p = Path(str(db_path) + suffix)
+        if p.exists():
+            p.unlink()
+
+    # Delete snapshots and logs
+    for pattern in ("*.log", "*.pid"):
+        for f in LURK_DIR.glob(pattern):
+            f.unlink(missing_ok=True)
+
+    snapshots_dir = LURK_DIR / "snapshots"
+    if snapshots_dir.exists():
+        import shutil
+        shutil.rmtree(snapshots_dir, ignore_errors=True)
+
+    console.print("[bold green]lurk reset complete.[/bold green] All context cleared.")
+    console.print("  Run [cyan]lurk[/cyan] to start fresh.")
 
 
 @app.command()

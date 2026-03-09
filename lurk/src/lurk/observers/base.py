@@ -26,6 +26,8 @@ class WorkflowUpdate:
     project: str = ""
     tool: str = ""
     files: list[str] = field(default_factory=list)
+    stakeholders: list[tuple[str, str]] = field(default_factory=list)  # (name, context)
+    is_break: bool = False
 
 
 @runtime_checkable

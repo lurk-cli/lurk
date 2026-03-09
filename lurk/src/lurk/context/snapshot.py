@@ -6,6 +6,28 @@ import time
 from dataclasses import dataclass, field
 
 
+# Apps that should not be considered primary work activities
+_BREAK_APPS = frozenset({
+    # Video/streaming
+    "youtube", "netflix", "hulu", "disney+", "prime video", "twitch",
+    "vlc", "iina", "plex", "hbo max", "apple tv",
+    # Gaming
+    "steam", "epic games", "battle.net", "origin", "gog galaxy",
+    "minecraft", "league of legends", "valorant", "fortnite",
+    # Social media (non-work)
+    "tiktok", "instagram", "snapchat", "reddit",
+    # Shopping
+    "amazon shopping",
+    # Music (background, not workflow-relevant)
+    "spotify", "apple music", "music",
+})
+
+
+def _is_break_app(app: str) -> bool:
+    """Check if an app is a break/entertainment app (not work-relevant)."""
+    return app.lower().strip() in _BREAK_APPS
+
+
 @dataclass
 class MonitorState:
     """State of a single monitor."""
@@ -31,20 +53,30 @@ class ActivityRecord:
     last_input: float = 0  # last time keyboard input was detected here
     input_seconds: float = 0  # cumulative seconds of active input
     dwell_seconds: float = 0  # total time with this app active
+    input_app: str | None = None  # which app is receiving input (from daemon attribution)
 
     @property
     def score(self) -> float:
-        """Activity score: input-weighted, recency-decayed."""
+        """Activity score: screen-observation-weighted, input supplements."""
         now = time.time()
+        # Screen observation is primary signal (~60%)
         recency = max(0, 1 - (now - self.last_seen) / 300)  # decays over 5 min
-        input_weight = min(1.0, self.input_seconds / 60)  # caps at 1 min of typing
+        dwell_weight = min(1.0, self.dwell_seconds / 120)  # caps at 2 min of screen time
+        # Input supplements screen observation (~20%)
+        input_weight = min(1.0, self.input_seconds / 60)
         input_recency = max(0, 1 - (now - self.last_input) / 120) if self.last_input else 0
-        return (input_weight * 0.5 + input_recency * 0.3 + recency * 0.2)
+        base = (dwell_weight * 0.40 + recency * 0.30 + input_weight * 0.15 + input_recency * 0.15)
+        # Penalize leisure apps — they should never be "primary" work context
+        if _is_break_app(self.app):
+            return base * 0.3
+        return base
 
     @property
     def is_primary(self) -> bool:
         """True if this looks like active work, not just a glance."""
-        return self.input_seconds > 5 or self.dwell_seconds > 30
+        if _is_break_app(self.app):
+            return False
+        return self.dwell_seconds > 15 or self.input_seconds > 5
 
     def label(self) -> str:
         """Human-readable label for this activity."""
@@ -73,6 +105,7 @@ class CurrentSnapshot:
     duration_seconds: float = 0
     interruptibility: str = "high"
     input_state: str = "idle"
+    input_app: str | None = None  # which app is receiving input
     active_monitor: int = 0
     monitors: list[MonitorState] = field(default_factory=list)
     tools_active: list[str] = field(default_factory=list)
@@ -115,9 +148,9 @@ class CurrentSnapshot:
         # Update activity ring
         self._update_activity_ring(event)
 
-    def _update_activity_ring(self, event: dict) -> None:
+    def _update_activity_ring(self, event: dict, app: str | None = None) -> None:
         """Track scored activity records for primary vs reference detection."""
-        app = event.get("app", "")
+        app = app or event.get("app", "")
         activity = event.get("activity", "unknown")
         ts = event.get("ts", time.time())
         input_state = event.get("input_state", self.input_state)
@@ -156,11 +189,14 @@ class CurrentSnapshot:
         if gap < 10:  # continuous observation
             record.dwell_seconds += gap
 
-        # Track input
+        # Track input with app attribution
         if input_state == "typing":
             record.last_input = ts
             if gap < 10:
                 record.input_seconds += gap
+            # Tag which app is receiving input
+            if hasattr(self, 'input_app') and self.input_app:
+                record.input_app = self.input_app
 
     def record_extension_input(self, app_hint: str, ts: float | None = None) -> None:
         """Record keyboard input detected by the browser extension."""
@@ -197,12 +233,13 @@ class CurrentSnapshot:
         primary = self.get_primary_activity()
         now = time.time()
         recent = [r for r in self._activity_ring if now - r.last_seen < 300]
-        refs = [r for r in recent if r is not primary and r.is_primary]
+        refs = [r for r in recent if r is not primary and r.is_primary and not _is_break_app(r.app)]
         refs.sort(key=lambda r: r.last_seen, reverse=True)
         return refs[:limit]
 
-    def update_input_state(self, state: str) -> None:
+    def update_input_state(self, state: str, app: str | None = None) -> None:
         self.input_state = state
+        self.input_app = app  # which app is receiving input
 
     def update_monitors(self, active_monitor: int, monitors: list[MonitorState]) -> None:
         self.active_monitor = active_monitor
@@ -225,6 +262,7 @@ class CurrentSnapshot:
             "duration_seconds": round(self.duration_seconds),
             "interruptibility": self.interruptibility,
             "input_state": self.input_state,
+            "input_app": self.input_app,
             "active_monitor": self.active_monitor,
             "monitors": [m.to_dict() for m in self.monitors],
             "tools_active": self.tools_active,

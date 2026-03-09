@@ -362,6 +362,91 @@ def search_captures(
     return results
 
 
+def run_retention(conn: sqlite3.Connection, config: dict[str, Any] | None = None) -> dict[str, int]:
+    """Run retention cleanup on all tables. Returns counts of deleted rows.
+
+    Default retention periods:
+    - events: 7 days
+    - enriched_events: 7 days
+    - captures: 3 days
+    - code_snapshots: 14 days
+    - sessions: 30 days
+    - stakeholders: keep 100 most recent
+    - artifacts: keep 100 most recent
+    - decisions: 14 days
+    """
+    config = config or {}
+    now = time.time()
+    deleted = {}
+
+    # Raw events — 7 days
+    cutoff = now - config.get("events_days", 7) * 86400
+    cursor = conn.execute("DELETE FROM events WHERE ts < ? AND enriched = 1", (cutoff,))
+    deleted["events"] = cursor.rowcount
+
+    # Enriched events — 7 days
+    cutoff = now - config.get("enriched_events_days", 7) * 86400
+    cursor = conn.execute("DELETE FROM enriched_events WHERE ts < ?", (cutoff,))
+    deleted["enriched_events"] = cursor.rowcount
+
+    # Captures — 3 days (these are large, with page_content)
+    cutoff = now - config.get("captures_days", 3) * 86400
+    cursor = conn.execute("DELETE FROM captures WHERE ts < ?", (cutoff,))
+    deleted["captures"] = cursor.rowcount
+    # Clean up FTS index for deleted captures
+    try:
+        conn.execute("INSERT INTO captures_fts(captures_fts) VALUES('rebuild')")
+    except Exception:
+        pass
+
+    # Code snapshots — 14 days
+    cutoff = now - config.get("code_snapshots_days", 14) * 86400
+    cursor = conn.execute("DELETE FROM code_snapshots WHERE ts < ?", (cutoff,))
+    deleted["code_snapshots"] = cursor.rowcount
+
+    # Sessions — 30 days
+    cutoff = now - config.get("sessions_days", 30) * 86400
+    cursor = conn.execute("DELETE FROM sessions WHERE start_ts < ?", (cutoff,))
+    deleted["sessions"] = cursor.rowcount
+
+    # Stakeholders — keep 100 most recent by last_seen
+    cursor = conn.execute("SELECT COUNT(*) FROM stakeholders")
+    count = cursor.fetchone()[0]
+    if count > 100:
+        cursor = conn.execute(
+            "DELETE FROM stakeholders WHERE id NOT IN "
+            "(SELECT id FROM stakeholders ORDER BY last_seen DESC LIMIT 100)"
+        )
+        deleted["stakeholders"] = cursor.rowcount
+
+    # Artifacts — keep 100 most recent by updated_ts
+    cursor = conn.execute("SELECT COUNT(*) FROM artifacts")
+    count = cursor.fetchone()[0]
+    if count > 100:
+        cursor = conn.execute(
+            "DELETE FROM artifacts WHERE id NOT IN "
+            "(SELECT id FROM artifacts ORDER BY updated_ts DESC LIMIT 100)"
+        )
+        deleted["artifacts"] = cursor.rowcount
+
+    # Decisions — 14 days
+    cutoff = now - config.get("decisions_days", 14) * 86400
+    cursor = conn.execute("DELETE FROM decisions WHERE ts < ?", (cutoff,))
+    deleted["decisions"] = cursor.rowcount
+
+    conn.commit()
+
+    # VACUUM to reclaim space (only if we deleted significant amounts)
+    total_deleted = sum(deleted.values())
+    if total_deleted > 100:
+        try:
+            conn.execute("VACUUM")
+        except Exception:
+            pass
+
+    return deleted
+
+
 def fetch_recent_raw_events(
     conn: sqlite3.Connection, hours: float = 1, limit: int = 200
 ) -> list[dict[str, Any]]:

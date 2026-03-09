@@ -43,10 +43,26 @@ _STOP_WORDS = frozenset({
 
 _WORD_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9_.-]{2,}")
 
+_BREAK_APPS = frozenset({
+    # Video/streaming
+    "youtube", "netflix", "hulu", "disney+", "prime video", "twitch",
+    "vlc", "iina", "plex", "hbo max", "apple tv",
+    # Gaming
+    "steam", "epic games", "battle.net", "origin", "gog galaxy",
+    "minecraft", "league of legends", "valorant", "fortnite",
+    # Social media (non-work)
+    "tiktok", "instagram", "snapchat", "reddit",
+    # Shopping
+    "amazon shopping",
+    # Music (background, not workflow-relevant)
+    "spotify", "apple music", "music",
+})
+
 # Max breadcrumbs/contributions per workflow
 MAX_BREADCRUMBS = 50
 MAX_CONTRIBUTIONS = 20
 MAX_RESEARCH = 20
+MAX_DOCUMENTS = 30
 
 
 @dataclass
@@ -91,7 +107,7 @@ class Workflow:
 
     # Breadcrumbs: natural language trail of what happened
     # e.g. "reading email about Project Alpha", "editing Q3 Revenue spreadsheet"
-    breadcrumbs: list[str] = field(default_factory=list)
+    breadcrumbs: list[dict] = field(default_factory=list)
 
     # Agent contributions: what each tool/agent produced
     # e.g. {"Claude Code": "built session watcher and HTTP server endpoints"}
@@ -135,13 +151,66 @@ class Workflow:
 
     # --- Context accumulation methods ---
 
-    def add_breadcrumb(self, description: str) -> None:
+    def add_breadcrumb(self, description: str, ts: float | None = None) -> None:
         """Record what the user was doing — dedupes consecutive identical entries."""
-        if self.breadcrumbs and self.breadcrumbs[-1] == description:
-            return
-        self.breadcrumbs.append(description)
+        ts = ts if ts is not None else time.time()
+
+        if self.breadcrumbs:
+            prev = self.breadcrumbs[-1]
+            # Backward compat: wrap plain str entries
+            if isinstance(prev, str):
+                prev = {"ts": ts, "description": prev, "duration_seconds": 0.0, "repeat_count": 1}
+                self.breadcrumbs[-1] = prev
+            if prev["description"] == description:
+                prev["repeat_count"] = prev.get("repeat_count", 1) + 1
+                prev["ts"] = ts
+                return
+            # Compute duration on previous entry
+            prev["duration_seconds"] = ts - prev["ts"]
+
+        self.breadcrumbs.append({
+            "ts": ts,
+            "description": description,
+            "duration_seconds": 0.0,
+            "repeat_count": 1,
+        })
         if len(self.breadcrumbs) > MAX_BREADCRUMBS:
             self.breadcrumbs = self.breadcrumbs[-MAX_BREADCRUMBS:]
+
+    def _format_breadcrumb_narrative(self, breadcrumbs: list[dict] | None = None, max_items: int = 6) -> str:
+        """Format breadcrumbs as a readable narrative trail."""
+        items = (breadcrumbs if breadcrumbs is not None else self.breadcrumbs)[-max_items:]
+        if not items:
+            return ""
+
+        segments: list[str] = []
+        quick: list[str] = []
+
+        for entry in items:
+            # Backward compat: wrap plain str entries
+            if isinstance(entry, str):
+                entry = {"ts": 0, "description": entry, "duration_seconds": 0.0, "repeat_count": 1}
+            dur = entry.get("duration_seconds", 0.0)
+            desc = entry.get("description", "")
+
+            if dur >= 30:
+                # Flush any pending quick lookups first
+                if quick:
+                    segments.append("quick lookups: " + ", ".join(quick))
+                    quick = []
+                if dur >= 60:
+                    minutes = int(dur / 60)
+                    segments.append(f"{desc} ({minutes}m)")
+                else:
+                    segments.append(f"{desc} ({int(dur)}s)")
+            else:
+                quick.append(desc)
+
+        # Flush remaining quick lookups
+        if quick:
+            segments.append("quick lookups: " + ", ".join(quick))
+
+        return " → ".join(segments)
 
     def add_agent_contribution(self, tool: str, summary: str) -> None:
         """Record what an agent contributed to this workflow."""
@@ -168,6 +237,11 @@ class Workflow:
     def add_document(self, name: str, description: str = "") -> None:
         """Record a document involved in this workflow."""
         self.documents[name] = description or self.documents.get(name, "")
+        if len(self.documents) > MAX_DOCUMENTS:
+            # Keep most recent entries (dicts are insertion-ordered in Python 3.7+)
+            keys = list(self.documents.keys())
+            for k in keys[:-MAX_DOCUMENTS]:
+                del self.documents[k]
 
     def add_tool(self, tool: str) -> None:
         if tool and tool not in self.tools:
@@ -292,9 +366,9 @@ class Workflow:
 
         # Activity trail — connect the dots
         if self.breadcrumbs:
-            recent = self.breadcrumbs[-6:]
-            trail = list(dict.fromkeys(recent))  # dedupe preserving order
-            parts.append("Recent activity: " + " → ".join(trail) + ".")
+            trail = self._format_breadcrumb_narrative()
+            if trail:
+                parts.append(f"Recent activity: {trail}.")
 
         # Research
         if self.research:
@@ -421,6 +495,16 @@ class WorkflowClusterer:
         Also extracts structured context from the event and adds it
         to the workflow — breadcrumbs, documents, research, etc.
         """
+        # Break apps: don't pollute workflow keywords, but keep the thread alive
+        app = event.get("app", "")
+        if app.lower().strip() in _BREAK_APPS:
+            active = self.get_active_workflow()
+            if active:
+                active.add_breadcrumb(f"break ({app})")
+                self._save_workflow(active, conn)
+                return active.id
+            return None
+
         keywords = []
         for fld in ("title", "file", "project", "topic", "document_name", "ticket"):
             val = event.get(fld)
@@ -517,6 +601,10 @@ class WorkflowClusterer:
                 wf.is_active = False
                 continue
             score = wf.overlap_score(keywords)
+            # Temporal affinity: recent activity in workflow boosts match
+            # This stitches cross-app workflows (e.g., Claude Code -> ChatGPT research)
+            recency = max(0, 1 - (now - wf.updated_ts) / 120)  # decays over 2 min
+            score = score + recency * 0.15  # boost recent workflows
             if score > best_score:
                 best_score = score
                 best_wf = wf
@@ -641,6 +729,8 @@ class WorkflowClusterer:
 def _describe_event(event: dict) -> str:
     """Turn an enriched event into a natural breadcrumb for the workflow."""
     app = event.get("app", "")
+    if app.lower().strip() in _BREAK_APPS:
+        return ""
     activity = event.get("activity", "")
     sub = event.get("sub_activity", "")
     doc = event.get("document_name")
@@ -674,6 +764,20 @@ def _describe_event(event: dict) -> str:
 
     if activity == "browsing" and topic:
         return f"looking at \"{topic}\""
+
+    # Screen-observed AI chat activity (e.g., on secondary display)
+    app_lower = app.lower()
+    _ai_chat_indicators = {"chatgpt": "ChatGPT", "claude": "Claude", "cursor": "Cursor", "copilot": "Copilot"}
+    for indicator, name in _ai_chat_indicators.items():
+        if indicator in app_lower:
+            display_note = ""
+            if event.get("monitor_id") is not None and event.get("is_secondary"):
+                display_note = " on secondary display"
+            if activity == "ai_chat" or "interacting" in activity:
+                return f"researching in {name}{display_note}"
+            if topic:
+                return f"viewing {name}: \"{topic}\"{display_note}"
+            return f"using {name}{display_note}"
 
     return ""
 

@@ -60,9 +60,10 @@ class ActivityBreadcrumb:
     """A snapshot of what the user was doing at a point in time."""
     ts: float
     description: str  # e.g. "reading email about project Alpha", "editing Q3 Revenue spreadsheet"
+    duration_seconds: float = 0.0
 
     def to_dict(self) -> dict:
-        return {"ts": self.ts, "description": self.description}
+        return {"ts": self.ts, "description": self.description, "duration_seconds": round(self.duration_seconds, 1)}
 
 
 @dataclass
@@ -125,17 +126,55 @@ class SessionState:
         """Record what the user was doing — dedupes consecutive identical descriptions."""
         if self.breadcrumbs and self.breadcrumbs[-1].description == description:
             return  # Same activity, skip
+        # Stamp duration on the previous breadcrumb
+        if self.breadcrumbs:
+            self.breadcrumbs[-1].duration_seconds = ts - self.breadcrumbs[-1].ts
         self.breadcrumbs.append(ActivityBreadcrumb(ts=ts, description=description))
         if len(self.breadcrumbs) > self.MAX_BREADCRUMBS:
             self.breadcrumbs = self.breadcrumbs[-self.MAX_BREADCRUMBS:]
 
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        """Format duration nicely: >= 60s as minutes, < 60s as seconds."""
+        if seconds >= 60:
+            minutes = int(seconds // 60)
+            return f"{minutes}m"
+        return f"{int(seconds)}s"
+
     def narrative(self) -> str:
-        """Build a natural narrative of what the user has been doing this session."""
+        """Build a dwell-aware narrative of what the user has been doing this session."""
         if not self.breadcrumbs:
             return ""
-        recent = self.breadcrumbs[-6:]
-        descriptions = list(dict.fromkeys(b.description for b in recent))
-        return " → ".join(descriptions)
+        recent = self.breadcrumbs[-10:]
+        parts: list[str] = []
+        quick_group: list[str] = []
+
+        def flush_quick() -> None:
+            if quick_group:
+                parts.append(f"quick lookups: {', '.join(quick_group)}")
+                quick_group.clear()
+
+        for b in recent:
+            if b.duration_seconds >= 30:
+                flush_quick()
+                dur = self._format_duration(b.duration_seconds)
+                parts.append(f"{b.description} ({dur})")
+            elif b.duration_seconds > 0:
+                quick_group.append(b.description)
+            else:
+                # No duration yet (current/last item) — show without duration
+                flush_quick()
+                parts.append(b.description)
+
+        flush_quick()
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for p in parts:
+            if p not in seen:
+                seen.add(p)
+                deduped.append(p)
+        return " \u2192 ".join(deduped)
 
     def to_dict(self) -> dict:
         return {

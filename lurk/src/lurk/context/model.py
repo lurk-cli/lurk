@@ -84,6 +84,10 @@ class ContextModel:
         activity = event.get("activity", "")
         if activity:
             self._pm_activity_counts[activity] = self._pm_activity_counts.get(activity, 0) + 1
+            if len(self._pm_activity_counts) > 50:
+                # Keep only the most common activities
+                sorted_activities = sorted(self._pm_activity_counts.items(), key=lambda x: x[1], reverse=True)
+                self._pm_activity_counts = dict(sorted_activities[:30])
 
         # PM features: track stakeholders from calendar, artifacts from documents, decisions from patterns
         self._process_pm_features(event)
@@ -151,7 +155,8 @@ class ContextModel:
 
         if event_type == "input_state" and isinstance(data, dict):
             state = data.get("state", "idle")
-            self.now.update_input_state(state)
+            app = data.get("app")  # which app is receiving input (from daemon)
+            self.now.update_input_state(state, app)
 
         elif event_type == "monitor_state" and isinstance(data, dict):
             active_monitor = data.get("active_monitor", 0)

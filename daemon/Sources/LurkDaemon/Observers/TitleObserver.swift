@@ -1,27 +1,19 @@
 import AppKit
-import ApplicationServices
+import CoreGraphics
 
 final class TitleObserver: Observer {
     let name = "Title"
     private(set) var isRunning = false
     private weak var manager: ObserverManager?
     private var timer: DispatchSourceTimer?
-    private let axTimeout: TimeInterval = 0.5
-    private let axQueue = DispatchQueue(label: "com.lurk.ax", qos: .utility)
     private var lastTitle: String?
     private var lastApp: String?
-    private let healthTracker = AppHealthTracker()
 
     init(manager: ObserverManager) {
         self.manager = manager
     }
 
     func start() {
-        guard AXIsProcessTrusted() else {
-            print("[lurk] Accessibility permission not granted — title capture disabled")
-            return
-        }
-
         isRunning = true
         scheduleNext()
     }
@@ -48,75 +40,52 @@ final class TitleObserver: Observer {
     }
 
     private func poll() {
-        guard let frontApp = NSWorkspace.shared.frontmostApplication,
-              let pid = Optional(frontApp.processIdentifier) else {
+        guard let frontApp = NSWorkspace.shared.frontmostApplication else {
             return
         }
 
         let appName = frontApp.localizedName ?? "Unknown"
         let bundleId = frontApp.bundleIdentifier ?? "unknown"
+        let pid = frontApp.processIdentifier
 
-        // Check health tracker — skip if app is in backoff
-        guard healthTracker.shouldPoll(bundleId: bundleId) else {
-            return
-        }
-
-        // Run AX call on dedicated queue with timeout
-        var title: String?
-        let semaphore = DispatchSemaphore(value: 0)
-
-        axQueue.async {
-            title = self.getWindowTitle(pid: pid)
-            semaphore.signal()
-        }
-
-        let result = semaphore.wait(timeout: .now() + axTimeout)
-        if result == .timedOut {
-            healthTracker.recordTimeout(bundleId: bundleId, appName: appName)
-            return
-        }
-
-        // AX call succeeded — reset backoff
-        healthTracker.recordSuccess(bundleId: bundleId)
-
-        let capturedTitle = title ?? appName  // fallback to app name for terminal apps
+        // Use CGWindowList to get window title — only needs Screen Recording permission
+        let title = getWindowTitle(pid: pid) ?? appName
 
         // Only emit if title or app changed
-        if capturedTitle != lastTitle || appName != lastApp {
-            lastTitle = capturedTitle
+        if title != lastTitle || appName != lastApp {
+            lastTitle = title
             lastApp = appName
             manager?.emit(RawEvent(
                 eventType: .titleChange,
                 app: appName,
                 bundleId: bundleId,
-                title: capturedTitle
+                title: title
             ))
         }
     }
 
     private func getWindowTitle(pid: pid_t) -> String? {
-        let appRef = AXUIElementCreateApplication(pid)
-
-        var windowValue: CFTypeRef?
-        let windowResult = AXUIElementCopyAttributeValue(
-            appRef,
-            kAXFocusedWindowAttribute as CFString,
-            &windowValue
-        )
-        guard windowResult == .success, let window = windowValue else {
+        // CGWindowListCopyWindowInfo requires Screen Recording permission (not Accessibility)
+        guard let windowList = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else {
             return nil
         }
 
-        var titleValue: CFTypeRef?
-        let titleResult = AXUIElementCopyAttributeValue(
-            window as! AXUIElement,
-            kAXTitleAttribute as CFString,
-            &titleValue
-        )
-        guard titleResult == .success, let title = titleValue as? String else {
-            return nil
+        // Find the frontmost window owned by this PID
+        for window in windowList {
+            guard let ownerPID = window[kCGWindowOwnerPID as String] as? pid_t,
+                  ownerPID == pid,
+                  let layer = window[kCGWindowLayer as String] as? Int,
+                  layer == 0  // normal windows only
+            else { continue }
+
+            if let name = window[kCGWindowName as String] as? String, !name.isEmpty {
+                return name
+            }
         }
 
-        return title
+        return nil
     }
 }

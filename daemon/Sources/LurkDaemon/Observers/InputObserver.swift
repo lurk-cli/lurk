@@ -1,3 +1,4 @@
+import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
@@ -28,39 +29,37 @@ final class InputObserver: Observer {
     }
 
     func start() {
-        guard AXIsProcessTrusted() else {
-            print("[lurk] Accessibility permission not granted — input observer disabled")
-            return
+        // Event tap needs Accessibility permission — try but don't block startup
+        if AXIsProcessTrusted() {
+            let eventMask: CGEventMask = (1 << CGEventType.keyDown.rawValue)
+                | (1 << CGEventType.mouseMoved.rawValue)
+                | (1 << CGEventType.leftMouseDown.rawValue)
+
+            if let tap = CGEvent.tapCreate(
+                tap: .cgSessionEventTap,
+                place: .tailAppendEventTap,
+                options: .listenOnly,
+                eventsOfInterest: eventMask,
+                callback: { _, type, event, refcon -> Unmanaged<CGEvent>? in
+                    guard let refcon = refcon else { return Unmanaged.passRetained(event) }
+                    let observer = Unmanaged<InputObserver>.fromOpaque(refcon).takeUnretainedValue()
+                    observer.handleEvent(type: type)
+                    return Unmanaged.passRetained(event)
+                },
+                userInfo: Unmanaged.passUnretained(self).toOpaque()
+            ) {
+                eventTap = tap
+                runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+                CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+                CGEvent.tapEnable(tap: tap, enable: true)
+            } else {
+                print("[lurk] Event tap unavailable — input tracking limited")
+            }
+        } else {
+            print("[lurk] No Accessibility permission — input state will default to 'reading' (title capture still works via Screen Recording)")
         }
 
-        let eventMask: CGEventMask = (1 << CGEventType.keyDown.rawValue)
-            | (1 << CGEventType.mouseMoved.rawValue)
-            | (1 << CGEventType.leftMouseDown.rawValue)
-
-        // Create a listen-only event tap
-        guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .tailAppendEventTap,
-            options: .listenOnly,
-            eventsOfInterest: eventMask,
-            callback: { _, type, event, refcon -> Unmanaged<CGEvent>? in
-                guard let refcon = refcon else { return Unmanaged.passRetained(event) }
-                let observer = Unmanaged<InputObserver>.fromOpaque(refcon).takeUnretainedValue()
-                observer.handleEvent(type: type)
-                return Unmanaged.passRetained(event)
-            },
-            userInfo: Unmanaged.passUnretained(self).toOpaque()
-        ) else {
-            print("[lurk] Failed to create event tap — input observer disabled")
-            return
-        }
-
-        eventTap = tap
-        runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
-
-        // Timer to check and emit state transitions
+        // Timer to check and emit state transitions (always runs)
         let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
         timer.schedule(deadline: .now() + stateCheckInterval, repeating: stateCheckInterval)
         timer.setEventHandler { [weak self] in
@@ -115,9 +114,18 @@ final class InputObserver: Observer {
 
         if newState != currentState {
             currentState = newState
+
+            var eventData: [String: Any] = ["state": newState.rawValue]
+
+            // Include frontmost app so Python knows which app the user is interacting with
+            if let frontApp = NSWorkspace.shared.frontmostApplication {
+                eventData["app"] = frontApp.localizedName ?? "Unknown"
+                eventData["bundle_id"] = frontApp.bundleIdentifier ?? "unknown"
+            }
+
             manager?.emit(RawEvent(
                 eventType: .inputState,
-                data: ["state": newState.rawValue]
+                data: eventData
             ))
         }
     }

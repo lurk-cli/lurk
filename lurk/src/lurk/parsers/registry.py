@@ -14,6 +14,7 @@ from .firefox import FirefoxParser
 from .slack import SlackParser
 from .teams import TeamsParser
 from .discord import DiscordParser
+from .messaging import MessagingParser
 from .terminal import TerminalParser
 from .figma import FigmaParser
 from .notion import NotionParser
@@ -45,6 +46,7 @@ class ParserRegistry:
             SlackParser(),
             TeamsParser(),
             DiscordParser(),
+            MessagingParser(),
             TerminalParser(),
             FigmaParser(),
             NotionParser(),

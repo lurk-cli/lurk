@@ -123,7 +123,7 @@ def _describe_current_work(now) -> str:
     """Describe what the user is working on, leading with specifics."""
     primary = now.get_primary_activity() if hasattr(now, "get_primary_activity") else None
 
-    if primary and primary.input_seconds > 5:
+    if primary and (primary.dwell_seconds > 15 or primary.input_seconds > 5):
         return _describe_activity_record(primary)
 
     # Fallback to snapshot fields
@@ -244,13 +244,26 @@ def _describe_references(now, config) -> str | None:
     if config is not None:
         ref_apps = [a.lower() for a in config.monitor_reference_apps]
 
+    # AI chat apps to highlight on secondary displays
+    _ai_chat_apps = {"chatgpt", "claude", "cursor", "copilot"}
+
+    other_screens: list[str] = []
     for m in now.monitors:
         if m.monitor_id != now.active_monitor and m.app and m.title:
             if ref_apps and m.app.lower() not in ref_apps:
                 continue
-            return f"They have {m.app} showing \"{m.title}\" on another screen."
+            app_lower = m.app.lower()
+            # Flag AI chat on secondary displays specifically
+            if any(ai in app_lower for ai in _ai_chat_apps):
+                other_screens.append(f"{m.app} ({m.title}) on secondary display — AI chat visible")
+            else:
+                other_screens.append(f"{m.app} showing \"{m.title}\" on another screen")
 
-    return None
+    if not other_screens:
+        return None
+    if len(other_screens) == 1:
+        return f"They have {other_screens[0]}."
+    return "Other screens: " + "; ".join(other_screens) + "."
 
 
 def _describe_tickets(now, session) -> str | None:

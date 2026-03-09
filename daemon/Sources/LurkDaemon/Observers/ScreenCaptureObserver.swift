@@ -1,7 +1,7 @@
 import AppKit
 import CoreGraphics
 
-/// Captures a screenshot of the frontmost window periodically.
+/// Captures screenshots of ALL connected displays periodically.
 /// The Python engine reads these images and uses OCR/vision to understand
 /// what the user is actually doing — much richer than window titles alone.
 final class ScreenCaptureObserver: Observer {
@@ -58,105 +58,149 @@ final class ScreenCaptureObserver: Observer {
         let bundleId = frontApp.bundleIdentifier ?? "unknown"
         let pid = frontApp.processIdentifier
 
-        // Capture the frontmost window using CGWindowList
-        guard let image = captureWindow(pid: pid) else {
-            // Fallback: capture the main display
-            guard let fallback = captureMainDisplay() else { return }
-            saveAndEmit(image: fallback, app: appName, bundleId: bundleId)
-            return
+        // Enumerate all connected displays
+        var displayCount: UInt32 = 0
+        CGGetActiveDisplayList(0, nil, &displayCount)
+        guard displayCount > 0 else { return }
+
+        var displayIDs = [CGDirectDisplayID](repeating: 0, count: Int(displayCount))
+        CGGetActiveDisplayList(displayCount, &displayIDs, &displayCount)
+
+        // Determine which display the frontmost window is on
+        let activeDisplayIndex = findActiveDisplay(pid: pid, displays: displayIDs)
+
+        // Capture each display
+        var displayMetas: [[String: Any]] = []
+        var capturedImages: [(index: Int, image: CGImage)] = []
+        let primaryID = CGMainDisplayID()
+
+        for (i, displayID) in displayIDs.enumerated() {
+            guard let image = CGDisplayCreateImage(displayID) else { continue }
+
+            let isPrimary = (displayID == primaryID)
+            var meta: [String: Any] = [
+                "display_id": i,
+                "width": image.width,
+                "height": image.height,
+                "is_primary": isPrimary,
+            ]
+
+            // Tag the active display with app info
+            if i == activeDisplayIndex {
+                meta["app"] = appName
+                meta["bundle_id"] = bundleId
+            }
+
+            displayMetas.append(meta)
+            capturedImages.append((index: i, image: image))
         }
 
-        saveAndEmit(image: image, app: appName, bundleId: bundleId)
-    }
+        guard !capturedImages.isEmpty else { return }
 
-    private func saveAndEmit(image: CGImage, app: String, bundleId: String) {
-        // Quick hash check — skip if screen hasn't changed much
-        let hash = roughHash(image)
-        if hash == lastCaptureHash {
+        // Combined hash across all displays for change detection
+        var combinedHash = 0
+        for (_, image) in capturedImages {
+            combinedHash = combinedHash &* 31 &+ roughHash(image)
+        }
+        if combinedHash == lastCaptureHash {
             return
         }
-        lastCaptureHash = hash
+        lastCaptureHash = combinedHash
 
-        // Save as JPEG (smaller than PNG, good enough for OCR)
-        let filename = "latest.jpg"
-        let fileURL = snapshotDir.appendingPathComponent(filename)
-
-        let dest = CGImageDestinationCreateWithURL(
-            fileURL as CFURL, "public.jpeg" as CFString, 1, nil
-        )
-        guard let dest = dest else { return }
-
-        // Compress to keep file small — OCR doesn't need high quality
-        let options: [CFString: Any] = [
+        // Save each display as latest_N.jpg
+        let jpegOptions: [CFString: Any] = [
             kCGImageDestinationLossyCompressionQuality: 0.6
         ]
-        CGImageDestinationAddImage(dest, image, options as CFDictionary)
-        CGImageDestinationFinalize(dest)
 
-        // Also write metadata so Python knows what app this is from
+        for (index, image) in capturedImages {
+            let fileURL = snapshotDir.appendingPathComponent("latest_\(index).jpg")
+            if let dest = CGImageDestinationCreateWithURL(
+                fileURL as CFURL, "public.jpeg" as CFString, 1, nil
+            ) {
+                CGImageDestinationAddImage(dest, image, jpegOptions as CFDictionary)
+                CGImageDestinationFinalize(dest)
+            }
+
+            // Backward compat: also save active display as latest.jpg
+            if index == activeDisplayIndex {
+                let compatURL = snapshotDir.appendingPathComponent("latest.jpg")
+                if let dest = CGImageDestinationCreateWithURL(
+                    compatURL as CFURL, "public.jpeg" as CFString, 1, nil
+                ) {
+                    CGImageDestinationAddImage(dest, image, jpegOptions as CFDictionary)
+                    CGImageDestinationFinalize(dest)
+                }
+            }
+        }
+
+        // Write metadata with all displays
         let metaURL = snapshotDir.appendingPathComponent("latest.json")
         let meta: [String: Any] = [
             "ts": Date().timeIntervalSince1970,
-            "app": app,
+            "displays": displayMetas,
+            "active_display": activeDisplayIndex,
+            "app": appName,
             "bundle_id": bundleId,
-            "width": image.width,
-            "height": image.height,
         ]
         if let data = try? JSONSerialization.data(withJSONObject: meta),
            let str = String(data: data, encoding: .utf8) {
             try? str.write(to: metaURL, atomically: true, encoding: .utf8)
         }
 
-        // Emit event so enrichment pipeline knows a screenshot is available
+        // Emit event so enrichment pipeline knows screenshots are available
+        let activeImage = capturedImages.first { $0.index == activeDisplayIndex }
         manager?.emit(RawEvent(
             eventType: .screenshot,
-            app: app,
+            app: appName,
             bundleId: bundleId,
             data: [
-                "path": fileURL.path,
-                "width": image.width,
-                "height": image.height,
+                "path": snapshotDir.appendingPathComponent("latest.jpg").path,
+                "width": activeImage?.image.width ?? 0,
+                "height": activeImage?.image.height ?? 0,
+                "display_count": capturedImages.count,
+                "active_display": activeDisplayIndex,
             ]
         ))
     }
 
-    /// Capture the frontmost window of a process.
-    private func captureWindow(pid: pid_t) -> CGImage? {
-        // Get all on-screen windows for this process
+    /// Determine which display the frontmost window is on by comparing
+    /// the window's bounds against each display's bounds.
+    private func findActiveDisplay(pid: pid_t, displays: [CGDirectDisplayID]) -> Int {
+        // Get the frontmost window's bounds
         guard let windowList = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements],
             kCGNullWindowID
-        ) as? [[String: Any]] else { return nil }
+        ) as? [[String: Any]] else { return 0 }
 
-        // Find the frontmost window belonging to this PID
+        var windowBounds: CGRect?
         for window in windowList {
             guard let ownerPID = window[kCGWindowOwnerPID as String] as? pid_t,
                   ownerPID == pid,
-                  let windowID = window[kCGWindowNumber as String] as? CGWindowID,
                   let layer = window[kCGWindowLayer as String] as? Int,
-                  layer == 0  // normal windows only
+                  layer == 0,
+                  let boundsDict = window[kCGWindowBounds as String] as? [String: Any],
+                  let rect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary)
             else { continue }
 
-            // Capture just this window
-            if let image = CGWindowListCreateImage(
-                .null,
-                .optionIncludingWindow,
-                windowID,
-                [.boundsIgnoreFraming, .nominalResolution]
-            ) {
-                // Skip tiny windows (tooltips, popups)
-                if image.width > 200 && image.height > 200 {
-                    return image
-                }
+            // Use the first normal-layer window we find
+            if rect.width > 200 && rect.height > 200 {
+                windowBounds = rect
+                break
             }
         }
 
-        return nil
-    }
+        guard let wBounds = windowBounds else { return 0 }
 
-    /// Fallback: capture the main display.
-    private func captureMainDisplay() -> CGImage? {
-        return CGDisplayCreateImage(CGMainDisplayID())
+        // Find the display with the most overlap
+        let windowCenter = CGPoint(x: wBounds.midX, y: wBounds.midY)
+        for (i, displayID) in displays.enumerated() {
+            let displayBounds = CGDisplayBounds(displayID)
+            if displayBounds.contains(windowCenter) {
+                return i
+            }
+        }
+
+        return 0  // Default to first display
     }
 
     /// Quick rough hash to detect if screen content changed significantly.

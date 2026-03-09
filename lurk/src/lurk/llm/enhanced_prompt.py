@@ -85,11 +85,30 @@ def _build_screen_prompt(model: ContextModel) -> str | None:
     if not screen_text:
         return None
 
+    parts.append("## What's on screen")
     parts.append(screen_text)
 
-    # Supplementary: metadata not visible in OCR
+    # Note if user is typing in a different app than the primary screen
     now = model.now
-    meta = []
+    input_app = getattr(now, "input_app", None)
+    if input_app and now.app and input_app.lower() != now.app.lower():
+        parts.append(f"User is typing in {input_app} (not the primary screen).")
+
+    # Brief note if leisure content detected on secondary screens (already filtered from OCR)
+    try:
+        from ..observers.screenshot_observer import get_screen_buffer
+        buf = get_screen_buffer()
+        leisure_apps = set()
+        for f in buf.frames[-5:]:
+            if getattr(f, 'relevance', 'work') == 'leisure':
+                leisure_apps.add(f.app)
+        if leisure_apps:
+            parts.append(f"(Ignoring background entertainment: {', '.join(sorted(leisure_apps))})")
+    except Exception:
+        pass
+
+    # Supplementary: metadata not visible in OCR
+    meta = ["## Additional context"]
     if now.project and now.branch:
         meta.append(f"Project: {now.project} (branch: {now.branch})")
     elif now.project:
@@ -131,7 +150,7 @@ def _build_screen_prompt(model: ContextModel) -> str | None:
             if dec_parts:
                 meta.append(f"Recent decisions: {'; '.join(dec_parts)}")
 
-    if meta:
+    if len(meta) > 1:  # more than just the header
         parts.append("\n".join(meta))
 
     return "\n\n".join(parts)
@@ -142,7 +161,7 @@ def _get_raw_screen_text() -> str | None:
     try:
         from ..observers.screenshot_observer import get_screen_buffer
         buf = get_screen_buffer()
-        text = buf.format_for_llm(max_chars=3000)
+        text = buf.format_for_llm(max_chars=4500)
         return text if text else None
     except Exception:
         return None
