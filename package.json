@@ -1,6 +1,6 @@
 {
   "name": "lurk-cli",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Context broker for AI tools — lurk sees everything on your screen and gives every AI agent the full picture",
   "bin": {
     "lurk": "./bin/lurk.js"
