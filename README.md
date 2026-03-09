@@ -14,7 +14,9 @@
 
 ---
 
-<!-- TODO: hero demo GIF/video here -->
+<p align="center">
+  <img src="https://raw.githubusercontent.com/lurk-cli/lurk/main/assets/lurk_demo.png" alt="lurk context demo" width="700" />
+</p>
 
 ```
 $ lurk context -p
@@ -36,9 +38,9 @@ People involved: Sarah Chen (API design), Mike (will review PR)
 [What I need help with: ]
 ```
 
-You open claude, gemini, or ChatGPT and you spend 5 minutes explaining what you're working on before you can ask your actual question.
+Every AI conversation starts from zero. You open Claude, Gemini, or ChatGPT and spend 5 minutes re-explaining what you're working on before you can ask your actual question.
 
-lurk fixes that. It watches your desktop — VS Code, Chrome, Slack, Notion, Figma, Terminal, and 30+ apps — and builds a running understanding of what you're working on. When you need AI help, `lurk context` gives you a ready-to-paste prompt with full context. Or just copy it: `lurk context -c`.
+lurk is a local observability layer for your desktop. It silently captures the context of your work — across VS Code, Chrome, Slack, Notion, Figma, Terminal, and 30+ apps — and builds a running understanding of what you're doing. When you need AI, `lurk context` gives you a ready-to-paste prompt with full context. Or just copy it: `lurk context -c`.
 
 It works for everyone. Developers get file paths, git branches, and code changes. PMs get stakeholder names, document context, and decision logs. Designers get Figma references. Marketers get conversation summaries from Slack and WhatsApp.
 
