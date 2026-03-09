@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
+
+# File extensions that suggest coding activity
+_CODE_EXT_PATTERN = re.compile(
+    r"\.(py|ts|tsx|js|jsx|go|rs|rb|java|kt|scala|cpp|c|h|cs|swift|lua|zig|"
+    r"toml|yaml|yml|json|xml|html|css|scss|sql|sh|bash|zsh|dockerfile|tf|proto)"
+    r"(\s|$|:|\b)",
+    re.IGNORECASE,
+)
 
 # App name keywords → activity
 _APP_RULES: dict[str, str] = {
@@ -75,6 +84,71 @@ _APP_RULES: dict[str, str] = {
     "monday": "planning",
     "trello": "planning",
     "productboard": "planning",
+    # Media playback
+    "quicktime": "media_playback",
+    "quicktime player": "media_playback",
+    "mpv": "media_playback",
+    "iina": "media_playback",
+    "vlc": "media_playback",
+    "podcasts": "media_playback",
+    "music": "media_playback",
+    "spotify": "media_playback",
+    # Audio editing
+    "audacity": "audio_editing",
+    "garageband": "audio_editing",
+    "logic pro": "audio_editing",
+    # Writing
+    "notes": "writing",
+    "bear": "writing",
+    "ia writer": "writing",
+    "ulysses": "writing",
+    "typora": "writing",
+    "google docs": "writing",
+    "google slides": "writing",
+    "coda": "writing",
+    # Spreadsheet work
+    "google sheets": "spreadsheet_work",
+    "airtable": "spreadsheet_work",
+    # Designing
+    "miro": "designing",
+    "whimsical": "designing",
+    "lucidchart": "designing",
+    # System
+    "system preferences": "system",
+    "system settings": "system",
+    "activity monitor": "system",
+    "console": "system",
+    "1password": "system",
+    "keychain": "system",
+    "bitwarden": "system",
+    # Coding tools
+    "docker": "coding",
+    "postman": "coding",
+    "insomnia": "coding",
+    "datagrip": "coding",
+    "dbeaver": "coding",
+    "sequel pro": "coding",
+    "tower": "coding",
+    "gitkraken": "coding",
+    "sourcetree": "coding",
+    "github desktop": "coding",
+    # Meeting
+    "google meet": "meeting",
+    "webex": "meeting",
+    "around": "meeting",
+    # Recording
+    "loom": "recording",
+    "obs": "recording",
+    "screenflow": "recording",
+    # Planning
+    "notion calendar": "planning",
+    "fantastical": "planning",
+    "todoist": "planning",
+    "things": "planning",
+    "omnifocus": "planning",
+    "clickup": "planning",
+    "height": "planning",
+    "shortcut": "planning",
 }
 
 
@@ -88,7 +162,15 @@ def classify_activity(app: str, title: str | None = None) -> str:
         if keyword in app_lower:
             return activity
 
-    return "unknown"
+    # Smart fallback: infer from title when no app rule matched
+    if title:
+        title_lower = title.lower()
+        if _CODE_EXT_PATTERN.search(title_lower):
+            return "coding"
+        if "http://" in title_lower or "https://" in title_lower or "www." in title_lower:
+            return "browsing"
+
+    return "general"
 
 
 def classify_interruptibility(

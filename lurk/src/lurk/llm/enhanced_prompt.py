@@ -30,18 +30,17 @@ logger = logging.getLogger("lurk.llm")
 # System prompt only used when an LLM provider is explicitly configured.
 # Most users won't hit this path.
 SYSTEM_PROMPT = """\
-You are generating context for an AI agent's system prompt. Your output will be \
-injected so the agent understands what the user is working on without being told.
+You are generating a brief context summary from raw screen text captured via OCR.
 
-You will receive raw text captured from the user's screen (via OCR). This is \
-exactly what they're looking at right now. Synthesize it into 2-4 sentences:
-
-1. GOAL — What is the user trying to accomplish?
-2. STATE — Where are they in the task? What's stuck?
-3. GROUNDING — Specific names, functions, files, error messages.
-4. CONNECTIONS — How do multiple screens relate?
-
-Write natural prose. Be specific. Do NOT mention screenshots or OCR."""
+Rules:
+- ONLY describe what is directly visible on screen. Do NOT infer goals or intent.
+- Use specific names: file names, function names, error messages, URLs, people names.
+- Do NOT interpret code variable names as the user's intent or project goals.
+- Do NOT mention screenshots, OCR, or how the data was captured.
+- If you see code, describe what file is open and what function/section is visible.
+- If you see a chat app, describe who the conversation is with and the topic.
+- If you see a document, describe the document title and what section is visible.
+- Keep it to 2-4 sentences. Be factual, not speculative."""
 
 
 def generate_enhanced_prompt(
@@ -201,8 +200,8 @@ def _try_llm_synthesis(
     """
     try:
         user_prompt = (
-            f"Synthesize this into a {max_tokens}-token context preamble for a "
-            f"{tool} AI tool:\n\n{screen_prompt}"
+            f"Describe what is visible on screen in {max_tokens} tokens or less. "
+            f"Only state facts, do not speculate about intent:\n\n{screen_prompt}"
         )
         response = provider.generate(user_prompt, system=SYSTEM_PROMPT, max_tokens=max_tokens)
         if response and response.text:

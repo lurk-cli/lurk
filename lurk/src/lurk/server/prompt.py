@@ -75,7 +75,7 @@ def generate_prompt(
 
     # 3. Activity trail — connects current work to recent context
     narrative = session.narrative()
-    if narrative and _fits(parts, narrative, max_chars):
+    if narrative and "screen_capture" not in narrative and _fits(parts, narrative, max_chars):
         parts.append(f"Earlier: {narrative}.")
 
     # 4. Screen content — what's actually visible (regex-extracted fallback)
@@ -183,8 +183,11 @@ def _describe_current_work(now) -> str:
     if topic and sub == "email_reading":
         return f"The user is reading an email about \"{topic}\"."
 
-    if now.activity and now.activity not in ("unknown", "idle"):
+    if now.activity and now.activity not in ("unknown", "idle", "general", "screen_capture", "system", "media_playback", "recording"):
         return f"The user is {now.activity} in {app}."
+
+    if now.activity:
+        return f"The user has {app} open."
 
     return ""
 
@@ -208,6 +211,11 @@ def _describe_activity_record(rec) -> str:
 
     if "ai_chat" in rec.activity or "interacting" in rec.activity:
         return f"The user is actively typing a prompt in {app}."
+
+    # Avoid exposing raw internal activity types in the prompt
+    _generic_activities = {"unknown", "idle", "screen_capture", "general", "system", "media_playback", "recording"}
+    if rec.activity in _generic_activities:
+        return f"The user has {app} open."
 
     return f"The user is actively {rec.activity} in {app}."
 

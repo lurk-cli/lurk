@@ -167,6 +167,8 @@ class SessionState:
                 parts.append(b.description)
 
         flush_quick()
+        # Filter out parts with internal type names that shouldn't be user-visible
+        parts = [p for p in parts if not p.startswith("screen_capture") and " screen_capture" not in p]
         # Deduplicate while preserving order
         seen: set[str] = set()
         deduped: list[str] = []
@@ -242,9 +244,12 @@ def _describe_activity(
         return f"in a conversation about \"{topic}\""
 
     if activity == "browsing" and topic:
+        # If topic is just the app name, say "browsing <app>" instead of 'looking at "<app>"'
+        if topic.lower() == app.lower() or topic.lower().startswith(app.lower()):
+            return f"browsing {topic}"
         return f"looking at \"{topic}\""
 
-    if activity not in ("unknown", "idle") and app:
+    if activity not in ("unknown", "idle", "screen_capture", "general", "system", "media_playback", "recording") and app:
         return f"{activity} in {app}"
 
     return ""

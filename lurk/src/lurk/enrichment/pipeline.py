@@ -91,7 +91,7 @@ class EnrichmentPipeline:
                 "ts": ts,
                 "app": app,
                 "title": title or f"screenshot:{data.get('width', '?')}x{data.get('height', '?')}",
-                "activity": "screen_capture",
+                "activity": "",
                 "sub_activity": "",
                 "intent": "",
                 "interruptibility": "",
