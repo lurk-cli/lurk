@@ -34,7 +34,6 @@ package-lock.json
 *~
 
 # Chrome extension (not published via git)
-extension/
 *.zip
 
 # Environment

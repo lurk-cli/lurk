@@ -67,9 +67,10 @@ def generate_enhanced_prompt(
             if hasattr(model, "workstreams") and hasattr(model.workstreams, "get_primary_workstream")
             else None
         )
-        if primary and primary.inferred_goal:
+        confidence = getattr(primary, "confidence", 0) if primary else 0
+        if primary and primary.inferred_goal and confidence >= 0.4:
             active = model.workstreams.get_active_workstreams()
-            secondary = [ws for ws in active if ws.id != primary.id][:2]
+            secondary = [ws for ws in active if ws.id != primary.id and getattr(ws, "confidence", 0) > 0.3][:2]
             if tool == "coding":
                 return format_cold_start_xml(primary, model, secondary)
             else:

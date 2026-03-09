@@ -59,8 +59,12 @@ class VSCodeParser(AppParser):
         if len(parts) >= 3:
             ctx.project = parts[1]
         elif len(parts) == 2:
-            # parts[1] is the app name — project might be embedded
-            pass
+            # 2-part title: "filename — folder" or "filename — AppName"
+            # If parts[1] looks like an app name, skip it
+            candidate = parts[1]
+            _app_names = {"visual studio code", "code", "cursor", "vscodium", "windsurf"}
+            if candidate.lower() not in _app_names:
+                ctx.project = candidate
 
         # Look for ticket references in the full title
         ticket_match = self._ticket_re.search(title)

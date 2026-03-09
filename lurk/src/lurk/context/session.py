@@ -150,11 +150,15 @@ class SessionState:
         quick_group: list[str] = []
 
         def flush_quick() -> None:
-            if quick_group:
-                parts.append(f"quick lookups: {', '.join(quick_group)}")
-                quick_group.clear()
+            filtered = [q for q in quick_group if q and q.strip() and not q.strip().startswith("in ")]
+            if filtered:
+                parts.append(f"quick lookups: {', '.join(filtered)}")
+            quick_group.clear()
 
         for b in recent:
+            desc = (b.description or "").strip()
+            if not desc or desc.startswith("in ") or desc.startswith("screen_capture"):
+                continue  # skip empty, malformed, or internal breadcrumbs
             if b.duration_seconds >= 30:
                 flush_quick()
                 dur = self._format_duration(b.duration_seconds)
@@ -167,8 +171,11 @@ class SessionState:
                 parts.append(b.description)
 
         flush_quick()
-        # Filter out parts with internal type names that shouldn't be user-visible
-        parts = [p for p in parts if not p.startswith("screen_capture") and " screen_capture" not in p]
+        # Filter out empty or internal-type parts
+        parts = [p for p in parts if p.strip()
+                 and not p.startswith("screen_capture")
+                 and " screen_capture" not in p
+                 and p != "quick lookups: "]
         # Deduplicate while preserving order
         seen: set[str] = set()
         deduped: list[str] = []
@@ -249,7 +256,7 @@ def _describe_activity(
             return f"browsing {topic}"
         return f"looking at \"{topic}\""
 
-    if activity not in ("unknown", "idle", "screen_capture", "general", "system", "media_playback", "recording") and app:
+    if activity and activity not in ("unknown", "idle", "screen_capture", "general", "system", "media_playback", "recording") and app:
         return f"{activity} in {app}"
 
     return ""

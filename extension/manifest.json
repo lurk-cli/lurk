@@ -1,0 +1,56 @@
+{
+  "manifest_version": 3,
+  "name": "lurk — AI Context",
+  "version": "0.2.0",
+  "description": "Stop re-explaining yourself to AI. lurk captures your work context and injects it into any AI chat.",
+  "permissions": ["storage"],
+  "host_permissions": ["http://127.0.0.1:4141/*", "http://localhost:4141/*"],
+  "icons": {
+    "16": "icons/icon-16.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "48": "icons/icon-48.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*",
+        "https://copilot.microsoft.com/*",
+        "https://perplexity.ai/*",
+        "https://www.perplexity.ai/*"
+      ],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["viewport.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://docs.google.com/*",
+        "https://sheets.google.com/*",
+        "https://slides.google.com/*",
+        "https://mail.google.com/*",
+        "https://calendar.google.com/*",
+        "https://drive.google.com/*"
+      ],
+      "js": ["collector.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

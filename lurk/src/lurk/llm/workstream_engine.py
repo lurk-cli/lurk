@@ -289,11 +289,21 @@ class WorkstreamEngine:
     def _build_discovery_prompt(self, signals_text: str, existing_text: str) -> str:
         """Build the workstream discovery prompt."""
         return f"""\
-You analyze a user's recent computer activity to identify what they are working on.
-A "workstream" is a coherent thread of work — something the user is trying to accomplish.
+You analyze a user's recent computer activity to identify what they are actively working on.
+A "workstream" is a coherent thread of sustained work — NOT a brief page visit or glance.
 
-Users may be developers, PMs, designers, marketers, or any knowledge worker.
-Their work may involve code, documents, messaging, browsing, or any combination.
+Rules:
+- Only create workstreams for activities with SUSTAINED engagement (multiple events, >1 minute).
+- Do NOT create workstreams for brief web browsing, quick lookups, or passing glances.
+- The "goal" must describe the actual work observable in the data, NOT speculate about intent.
+- NEVER copy examples from this prompt into your output. Use ONLY information from the EVENTS/CONVERSATIONS/DOCUMENTS/CODE CHANGES sections below.
+- Bad goal: "The user is trying to learn about X" (speculative — brief browsing is not a workstream)
+- Good goal format: describe the specific files, project, or topic visible in the data
+- Do NOT include app names (like "Code", "Chrome") in the goal — focus on WHAT is being worked on, not WHERE
+- Extract project names and file names from window titles (e.g. "scenario.md — lurk" means file "scenario.md" in project "lurk")
+- Do NOT invent conversations, people, decisions, or topics that are not explicitly present in the data below
+- If the data only shows app usage without clear purpose, set confidence below 0.3
+- If the primary activity is coding, focus on WHAT is being coded (project, files, language).
 
 Here are the user's recent activities:
 
@@ -302,15 +312,15 @@ Here are the user's recent activities:
 EXISTING WORKSTREAMS (update or keep these if still relevant):
 {existing_text}
 
-Identify the distinct workstreams. For each, return a JSON object with:
+Identify the distinct workstreams (usually 1-3, rarely more). For each, return a JSON object with:
 - "maps_to": ID of an existing workstream this matches, or "new"
-- "goal": What is the user trying to accomplish? (1 clear sentence)
+- "goal": What is the user actively working on? (1 factual sentence, describe observable work)
 - "persona": "developer" | "pm" | "designer" | "marketer" | "general"
-- "state": What's the current state of this work? (1 sentence)
-- "key_people": [list of people names involved]
-- "key_decisions": [list of decisions made, if any]
-- "confidence": 0.0-1.0 how confident you are
-- "artifacts": [list of files/docs/resources being worked on]
+- "state": What's happening right now? (1 factual sentence)
+- "key_people": [list of people names mentioned in conversations/docs]
+- "key_decisions": [list of decisions explicitly stated, not inferred]
+- "confidence": 0.0-1.0 how confident you are (use <0.3 for brief/unclear activity)
+- "artifacts": [list of specific files/docs/resources being worked on]
 - "research": [{{"topic": "...", "source": "..."}}] if they researched something
 - "communications": [{{"who": "...", "channel": "...", "summary": "..."}}] if they communicated
 

@@ -143,6 +143,19 @@ class EnrichmentPipeline:
         # Parse the title
         ctx = self.parser_registry.parse(title, app, event.get("bundle_id"))
 
+        # Classify domain intent for browsing activities
+        domain_intent_data = None
+        domain_category = None
+        if ctx.url_domain:
+            try:
+                from .domain_intent import classify_domain_intent
+                di = classify_domain_intent(ctx.url_domain)
+                if di:
+                    domain_intent_data = di.intent
+                    domain_category = di.category
+            except ImportError:
+                pass
+
         # Override activity if parser didn't set one
         if ctx.activity == "unknown":
             ctx.activity = classify_activity(app, title)
@@ -189,6 +202,8 @@ class EnrichmentPipeline:
             "sub_activity": ctx.sub_activity,
             "intent": intent,
             "interruptibility": interruptibility,
+            "domain_intent": domain_intent_data,
+            "domain_category": domain_category,
             "agent_tool": agent_tool,
             "agent_state": agent_state,
         })

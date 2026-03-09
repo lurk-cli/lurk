@@ -6,6 +6,7 @@ import json
 import logging
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 from ..context.model import ContextModel
@@ -270,8 +271,16 @@ class ContextServer:
             self.workstream_manager._db = str(DB_PATH)
             self.workstream_manager._load_from_db()
 
+        # Seed project identity from cwd — gives instant context on startup
+        self._seed_identity_from_cwd()
+
         # Auto-discover git repos from known projects
         self.git_watcher.auto_discover_from_model(self.model)
+
+        # Populate project identity cache from discovered repos
+        for repo_path in self.git_watcher._repos:
+            project_name = Path(repo_path).name
+            self.model.project_identity.set(project_name, repo_path)
 
         # Start enrichment thread
         enrichment_thread = threading.Thread(
@@ -429,6 +438,25 @@ class ContextServer:
 
         return "No context accumulated for this workflow yet."
 
+    def _seed_identity_from_cwd(self) -> None:
+        """Seed project identity from the current working directory.
+
+        If lurk is started from inside a git repo, immediately read its
+        README/CLAUDE.md so the first prompt already has project context
+        — no need to wait for enrichment events to discover the repo.
+        """
+        cwd = Path.cwd()
+        # Walk up to find the git root
+        p = cwd
+        while p != p.parent:
+            if (p / ".git").exists():
+                project_name = p.name
+                self.model.project_identity.set(project_name, str(p))
+                self.git_watcher.register_project(project_name, str(p))
+                logger.info("Seeded project identity from cwd: %s (%s)", project_name, p)
+                return
+            p = p.parent
+
     def _enrichment_loop(self) -> None:
         """Background loop that enriches events and updates the model."""
         logger.info("Enrichment loop started")
@@ -446,6 +474,13 @@ class ContextServer:
                             self.model.process_enriched_event(event)
                             # Auto-discover git repos from file paths in events
                             self.git_watcher.register_from_enriched_event(event)
+                            # Populate identity cache for newly discovered repos
+                            project = event.get("project")
+                            if project and not self.model.project_identity.get(project):
+                                for rpath in self.git_watcher._repos:
+                                    if Path(rpath).name == project:
+                                        self.model.project_identity.set(project, rpath)
+                                        break
                             # Feed events into workstream staging buffer
                             if self.workstream_manager:
                                 self.workstream_manager.ingest_event(event)
@@ -541,6 +576,10 @@ class ContextServer:
                                 snap.total_additions, snap.total_deletions,
                                 len(snap.file_diffs),
                             )
+
+                        # Push snapshots to in-memory model (capped at 10)
+                        self.model.recent_code_snapshots.extend(snapshots)
+                        self.model.recent_code_snapshots = self.model.recent_code_snapshots[-10:]
                     finally:
                         conn.close()
             except Exception:

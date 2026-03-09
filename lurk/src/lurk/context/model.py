@@ -8,6 +8,7 @@ import time
 from typing import Any
 
 from .agents import AgentRegistry
+from .identity import ProjectIdentityCache
 from .project import ProjectGraph
 from .session import CompactSession, SessionTracker
 from .snapshot import CurrentSnapshot, MonitorState
@@ -42,6 +43,8 @@ class ContextModel:
         self.decisions = DecisionDetector()
         self.workstreams = WorkstreamManager()
         self.workstream_engine: Any = None  # WorkstreamEngine, set externally
+        self.project_identity = ProjectIdentityCache()
+        self.recent_code_snapshots: list = []  # capped at 10 most recent
 
     @property
     def session(self):

@@ -34,9 +34,11 @@ def generate_cold_start_prompt(model: ContextModel) -> str:
     if hasattr(model, "workstreams") and hasattr(model.workstreams, "get_primary_workstream"):
         primary = model.workstreams.get_primary_workstream()
 
-    if primary and primary.inferred_goal:
+    # Only use workstream if it has a real goal and sufficient confidence
+    confidence = getattr(primary, "confidence", 0) if primary else 0
+    if primary and primary.inferred_goal and confidence >= 0.4:
         active = model.workstreams.get_active_workstreams()
-        secondary = [ws for ws in active if ws.id != primary.id][:2]
+        secondary = [ws for ws in active if ws.id != primary.id and getattr(ws, "confidence", 0) > 0.3][:2]
         return format_cold_start_human(primary, model, secondary)
 
     return format_cold_start_fallback(model)
@@ -213,7 +215,7 @@ def _describe_activity_record(rec) -> str:
         return f"The user is actively typing a prompt in {app}."
 
     # Avoid exposing raw internal activity types in the prompt
-    _generic_activities = {"unknown", "idle", "screen_capture", "general", "system", "media_playback", "recording"}
+    _generic_activities = {"unknown", "idle", "screen_capture", "general", "system", "media_playback", "recording", ""}
     if rec.activity in _generic_activities:
         return f"The user has {app} open."
 
