@@ -26,11 +26,12 @@ but the refresh endpoint isn't written yet.
 
 Key context:
 - Using JWT with RS256 over session auth because the API is stateless
-- Token policy: 1-hour access tokens, 30-day refresh (agreed with Sarah)
+- Token policy: 1-hour access tokens, 30-day refresh (agreed with Sarah in Slack)
 - Key files: auth/middleware.ts, server/http.ts
-- Researched JWT refresh token rotation on Stack Overflow
+- Asked Claude Code to scaffold the middleware — it built token validation but skipped refresh
+- Discussed token rotation approach with Gemini, decided on sliding window
 
-People involved: Sarah Chen (API design), Mike (will review)
+People involved: Sarah Chen (API design), Mike (will review PR)
 
 [What I need help with: ]
 ```
