@@ -26,6 +26,10 @@ from .schema import (
     STAKEHOLDERS_SCHEMA,
     WORKFLOWS_INDEXES,
     WORKFLOWS_SCHEMA,
+    WORKSTREAMS_V2_SCHEMA,
+    WORKSTREAMS_V2_INDEXES,
+    WORKSTREAM_EVENTS_SCHEMA,
+    WORKSTREAM_EVENTS_INDEXES,
 )
 
 DB_PATH = Path.home() / ".lurk" / "store.db"
@@ -73,6 +77,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute(idx)
     conn.execute(DECISIONS_SCHEMA)
     for idx in DECISIONS_INDEXES:
+        conn.execute(idx)
+    conn.execute(WORKSTREAMS_V2_SCHEMA)
+    for idx in WORKSTREAMS_V2_INDEXES:
+        conn.execute(idx)
+    conn.execute(WORKSTREAM_EVENTS_SCHEMA)
+    for idx in WORKSTREAM_EVENTS_INDEXES:
         conn.execute(idx)
     _migrate_agent_columns(conn)
     conn.commit()

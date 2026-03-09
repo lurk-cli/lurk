@@ -211,3 +211,45 @@ DECISIONS_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_decisions_ts ON decisions(ts)",
     "CREATE INDEX IF NOT EXISTS idx_decisions_workflow ON decisions(workflow_id)",
 ]
+
+# Workstreams — LLM-inferred coherent threads of work
+WORKSTREAMS_V2_SCHEMA = """
+CREATE TABLE IF NOT EXISTS workstreams (
+    id TEXT PRIMARY KEY,
+    inferred_goal TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    persona TEXT NOT NULL DEFAULT 'general',
+    created_ts REAL NOT NULL,
+    updated_ts REAL NOT NULL,
+    last_llm_refresh_ts REAL NOT NULL DEFAULT 0,
+    confidence REAL DEFAULT 0.5,
+    primary_artifacts TEXT,
+    supporting_research TEXT,
+    related_communications TEXT,
+    key_decisions TEXT,
+    current_state TEXT,
+    key_people TEXT,
+    git_branches TEXT,
+    projects TEXT,
+    tools_used TEXT,
+    activity_score REAL DEFAULT 1.0,
+    event_count INTEGER DEFAULT 0
+)
+"""
+
+WORKSTREAMS_V2_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_workstreams_status ON workstreams(status, updated_ts)",
+]
+
+WORKSTREAM_EVENTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS workstream_events (
+    workstream_id TEXT NOT NULL,
+    event_id INTEGER NOT NULL,
+    ts REAL NOT NULL,
+    PRIMARY KEY (workstream_id, event_id)
+)
+"""
+
+WORKSTREAM_EVENTS_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_workstream_events_ws ON workstream_events(workstream_id)",
+]

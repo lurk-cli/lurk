@@ -859,10 +859,17 @@ class ScreenshotObserver:
 
         # If messaging app, extract conversation context from OCR
         chat_context = None
+        conversation_extract = None
+        document_extract = None
         if all_blocks and app:
-            from ..parsers.messaging_ocr import is_messaging_app, analyze_chat_screen
+            from ..parsers.messaging_ocr import is_messaging_app, analyze_chat_screen, extract_conversation
             if is_messaging_app(app):
                 chat_context = analyze_chat_screen(all_blocks, app, active_frame.title)
+                conversation_extract = extract_conversation(all_blocks, app, active_frame.title)
+            else:
+                from ..parsers.document_ocr import is_document_app, analyze_document_screen
+                if is_document_app(app):
+                    document_extract = analyze_document_screen(all_blocks, app, active_frame.title)
 
         # Still produce WorkflowUpdates for workflow clustering
         keywords = []
@@ -900,6 +907,8 @@ class ScreenshotObserver:
             breadcrumb=breadcrumb,
             tool=app,
             stakeholders=stakeholders,
+            conversation_extract=conversation_extract,
+            document_extract=document_extract,
         )]
 
     def get_latest_context(self) -> dict[str, Any] | None:

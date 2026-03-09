@@ -11,7 +11,7 @@ Adding a new observer = implement one class with a `check()` method.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 @dataclass
@@ -28,6 +28,8 @@ class WorkflowUpdate:
     files: list[str] = field(default_factory=list)
     stakeholders: list[tuple[str, str]] = field(default_factory=list)  # (name, context)
     is_break: bool = False
+    conversation_extract: Any | None = None  # ConversationExtract from messaging OCR
+    document_extract: Any | None = None      # DocumentExtract from document OCR
 
 
 @runtime_checkable

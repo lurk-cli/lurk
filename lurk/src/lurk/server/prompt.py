@@ -18,6 +18,30 @@ if TYPE_CHECKING:
     from ..context.model import ContextModel
 
 
+def generate_cold_start_prompt(model: ContextModel) -> str:
+    """Generate a cold-start prompt for pasting into AI chat interfaces.
+
+    Uses workstream data when available, falls back to a simpler format
+    built from whatever context the model has.
+    """
+    try:
+        from ..llm.synthesis import format_cold_start_human, format_cold_start_fallback
+    except ImportError:
+        # synthesis module not available — use basic prompt
+        return generate_prompt(model)
+
+    primary = None
+    if hasattr(model, "workstreams") and hasattr(model.workstreams, "get_primary_workstream"):
+        primary = model.workstreams.get_primary_workstream()
+
+    if primary and primary.inferred_goal:
+        active = model.workstreams.get_active_workstreams()
+        secondary = [ws for ws in active if ws.id != primary.id][:2]
+        return format_cold_start_human(primary, model, secondary)
+
+    return format_cold_start_fallback(model)
+
+
 def generate_prompt(
     model: ContextModel,
     max_tokens: int = 250,

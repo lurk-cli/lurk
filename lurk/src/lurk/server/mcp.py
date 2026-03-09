@@ -43,6 +43,8 @@ def _get_model() -> ContextModel:
             _model.load_from_db(conn)
         finally:
             conn.close()
+        # WorkstreamManager is already initialized in ContextModel.__init__
+        # No extra initialization needed here
     return _model
 
 
@@ -288,6 +290,24 @@ def create_mcp_server():
             return {"workflow_id": workflow_id, "decisions": [d.to_dict() for d in decisions]}
         recent = model.decisions.get_recent(hours=hours)
         return {"total": len(recent), "recent": [d.to_dict() for d in recent]}
+
+    @mcp.tool()
+    def get_cold_start_prompt() -> str:
+        """Get a cold-start prompt with full context for pasting into an AI chat.
+        Contains the user's current workstream, key context, decisions, and artifacts."""
+        _refresh()
+        from ..server.prompt import generate_cold_start_prompt
+        return generate_cold_start_prompt(_get_model())
+
+    @mcp.tool()
+    def get_workstreams() -> dict:
+        """Get all active workstreams the user is currently working on.
+        Each workstream has an inferred goal, current state, key people, decisions, and artifacts."""
+        _refresh()
+        model = _get_model()
+        if hasattr(model, 'workstreams') and model.workstreams:
+            return model.workstreams.to_dict()
+        return {"workstreams": [], "primary": None}
 
     @mcp.tool()
     def get_workflow_agent_history(workflow_id: int = 0) -> dict[str, Any]:

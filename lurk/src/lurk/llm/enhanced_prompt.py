@@ -53,11 +53,32 @@ def generate_enhanced_prompt(
 ) -> str:
     """Generate a context prompt for a consuming agent.
 
-    Default path (no LLM, no cost): raw screen text + metadata.
-    Optional path (LLM configured): synthesized summary.
-    Fallback: rules-based prompt from categorical labels.
+    Priority:
+    1. Workstream-based cold start (if workstreams exist with inferred goals)
+    2. Raw screen text + metadata (no LLM, no cost)
+    3. Optional LLM synthesis of screen text
+    4. Rules-based prompt from categorical labels
     """
-    # Try raw screen text first — this is the best signal and costs nothing
+    # Try workstream-based cold start first
+    try:
+        from .synthesis import format_cold_start_xml, format_cold_start_human
+
+        primary = (
+            model.workstreams.get_primary_workstream()
+            if hasattr(model, "workstreams") and hasattr(model.workstreams, "get_primary_workstream")
+            else None
+        )
+        if primary and primary.inferred_goal:
+            active = model.workstreams.get_active_workstreams()
+            secondary = [ws for ws in active if ws.id != primary.id][:2]
+            if tool == "coding":
+                return format_cold_start_xml(primary, model, secondary)
+            else:
+                return format_cold_start_human(primary, model, secondary)
+    except Exception:
+        logger.debug("Workstream synthesis unavailable, falling back")
+
+    # Try raw screen text — this is the best signal and costs nothing
     screen_prompt = _build_screen_prompt(model)
     if screen_prompt:
         # If an LLM is configured, optionally synthesize a shorter version

@@ -15,6 +15,7 @@ from .workflows import WorkflowClusterer
 from .stakeholders import StakeholderGraph
 from .artifacts import ArtifactTracker
 from .decisions import DecisionDetector
+from .workstreams import WorkstreamManager
 
 logger = logging.getLogger("lurk.context")
 
@@ -39,6 +40,8 @@ class ContextModel:
         self.stakeholders = StakeholderGraph()
         self.artifacts = ArtifactTracker()
         self.decisions = DecisionDetector()
+        self.workstreams = WorkstreamManager()
+        self.workstream_engine: Any = None  # WorkstreamEngine, set externally
 
     @property
     def session(self):
@@ -79,6 +82,7 @@ class ContextModel:
         self.projects.update(event)
         self.agents.process_event(event)
         self.workflows.process_enriched_event(event)
+        self.workstreams.ingest_event(event)
 
         # Track activity distribution for PM auto-detection
         activity = event.get("activity", "")
@@ -231,6 +235,16 @@ class ContextModel:
                      (time.time() - session.start_time) / 60,
                      len(session.projects_touched))
 
+    async def refresh_workstreams(self) -> bool:
+        """Trigger LLM-based workstream refresh if engine is available."""
+        if self.workstream_engine is None:
+            return False
+        try:
+            return await self.workstream_engine.maybe_refresh(self.workstreams)
+        except Exception:
+            logger.debug("Workstream refresh failed", exc_info=True)
+            return False
+
     def to_dict(self) -> dict:
         return {
             "now": self.now.to_dict(),
@@ -242,4 +256,5 @@ class ContextModel:
             "stakeholders": self.stakeholders.to_dict(),
             "artifacts": self.artifacts.to_dict(),
             "decisions": self.decisions.to_dict(),
+            "workstreams": self.workstreams.to_dict(),
         }

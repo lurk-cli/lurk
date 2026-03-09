@@ -7,12 +7,18 @@ No ML required — just spatial reasoning about chat UI layouts.
 
 from __future__ import annotations
 
+import hashlib
 import re
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 
 from .spatial import TextBlock
 
+
+# ---------------------------------------------------------------------------
+# Data classes
+# ---------------------------------------------------------------------------
 
 @dataclass
 class ChatContext:
@@ -24,9 +30,28 @@ class ChatContext:
     breadcrumb: str = ""
 
 
+@dataclass
+class ConversationExtract:
+    """Rich structured data extracted from a messaging screenshot."""
+    app: str                         # Slack, WhatsApp, etc.
+    channel_or_contact: str
+    speakers: list[str]              # extracted names
+    messages: list[dict]             # {"speaker": str, "text": str}
+    decisions: list[str]             # "Agreed to ship by Friday"
+    dates_mentioned: list[str]       # "March 15", "next Tuesday"
+    names_mentioned: list[str]       # people referenced
+    numbers_mentioned: list[str]     # "$50k", "3 sprints"
+    topic_summary: str               # brief summary
+    dedupe_hash: str                 # for cross-capture deduplication
+
+
+# ---------------------------------------------------------------------------
+# Constants and patterns
+# ---------------------------------------------------------------------------
+
 _MESSAGING_APPS = {
     "wechat", "微信", "whatsapp", "telegram", "line", "signal",
-    "messages", "imessage",
+    "messages", "imessage", "slack",
 }
 
 _WORD_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9_.-]{2,}")
@@ -59,6 +84,118 @@ _TIMESTAMP_RE = re.compile(
 _CJK_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf\uF900-\uFAFF]")
 _CJK_WORD_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf\uF900-\uFAFF]{2,}")
 
+# Decision language patterns
+_DECISION_RE = re.compile(
+    r"(?i)\b(?:"
+    r"let'?s\s+go\s+with|"
+    r"agreed\s+(?:to|on|that)|"
+    r"decided\s+(?:to|on|that)|"
+    r"approved|"
+    r"confirmed|"
+    r"we'?ll\s+\w+|"
+    r"plan\s+is\s+to|"
+    r"going\s+with|"
+    r"settled\s+on|"
+    r"let'?s\s+do|"
+    r"sounds\s+good|"
+    r"ship\s+(?:it|by|on)"
+    r")\b"
+)
+
+# Date/time reference patterns
+_DATE_RE = re.compile(
+    r"(?i)\b(?:"
+    # Named months with optional day: "March 15", "Jan 3rd"
+    r"(?:January|February|March|April|May|June|July|August|September|October|November|December|"
+    r"Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.?\s+\d{1,2}(?:st|nd|rd|th)?|"
+    # Numeric dates: "3/15", "03/15/2026", "2026-03-15"
+    r"\d{1,2}/\d{1,2}(?:/\d{2,4})?|"
+    r"\d{4}-\d{2}-\d{2}|"
+    # Relative dates
+    r"next\s+(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|"
+    r"Mon|Tue|Wed|Thu|Fri|Sat|Sun|week|month|quarter)|"
+    r"this\s+(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|"
+    r"Mon|Tue|Wed|Thu|Fri|Sat|Sun|week|month|quarter)|"
+    r"(?:by|before|after|until)\s+(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|"
+    r"Mon|Tue|Wed|Thu|Fri|Sat|Sun|EOD|end\s+of\s+(?:day|week|month|quarter))|"
+    r"tomorrow|"
+    r"end\s+of\s+(?:day|week|month|quarter|year)|"
+    r"EOD|EOW|EOM|EOQ|"
+    r"Q[1-4]\b(?:\s+\d{4})?|"
+    r"(?:by|before|on)\s+Friday|"
+    r"(?:by|before|on)\s+Monday"
+    r")\b"
+)
+
+# Significant numbers: monetary, percentages, versions, quantities with units
+_NUMBER_RE = re.compile(
+    r"(?i)(?:"
+    # Monetary: "$50k", "$1.5M", "$100", "100k"
+    r"\$[\d,.]+[KkMmBb]?|"
+    r"\d+(?:\.\d+)?[KkMmBb]\b|"
+    # Percentages: "100%", "50.5%"
+    r"\d+(?:\.\d+)?%|"
+    # Versions: "v2.0", "v1.2.3"
+    r"v\d+(?:\.\d+)+|"
+    # Quantities with units: "3 sprints", "5 days", "2 weeks"
+    r"\d+\s+(?:sprint|sprints|day|days|week|weeks|month|months|hour|hours|"
+    r"point|points|story\s+points?|ticket|tickets|bug|bugs|PR|PRs|"
+    r"engineer|engineers|people|team|teams|instance|instances|"
+    r"node|nodes|server|servers|cluster|clusters|"
+    r"user|users|customer|customers|request|requests)"
+    r")"
+)
+
+# Common stop words for name extraction (beyond _STOP_WORDS)
+_NAME_STOP_WORDS = frozenset({
+    "The", "This", "That", "These", "Those", "Here", "There",
+    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+    "January", "February", "March", "April", "May", "June", "July",
+    "August", "September", "October", "November", "December",
+    "OK", "LGTM", "TODO", "FYI", "ASAP", "WIP", "TBD", "TBA",
+    "PM", "AM", "EST", "PST", "UTC", "GMT",
+    "True", "False", "None", "Null",
+})
+
+# ---------------------------------------------------------------------------
+# Deduplication cache
+# ---------------------------------------------------------------------------
+
+_seen_hashes: dict[str, float] = {}
+_SEEN_MAX_SIZE = 200
+_SEEN_TTL = 300.0  # 5 minutes
+
+
+def _check_and_store_hash(dedupe_hash: str) -> bool:
+    """Check if a hash was recently seen. Returns True if duplicate.
+
+    Also cleans old entries when cache exceeds max size.
+    """
+    now = time.time()
+
+    # Clean old entries if cache is too large
+    if len(_seen_hashes) >= _SEEN_MAX_SIZE:
+        expired = [h for h, ts in _seen_hashes.items() if now - ts > _SEEN_TTL]
+        for h in expired:
+            del _seen_hashes[h]
+        # If still too large after cleaning expired, remove oldest
+        if len(_seen_hashes) >= _SEEN_MAX_SIZE:
+            oldest = sorted(_seen_hashes.items(), key=lambda x: x[1])
+            for h, _ in oldest[:len(_seen_hashes) - _SEEN_MAX_SIZE + 1]:
+                del _seen_hashes[h]
+
+    # Check for recent duplicate
+    if dedupe_hash in _seen_hashes:
+        if now - _seen_hashes[dedupe_hash] < _SEEN_TTL:
+            return True  # duplicate
+
+    _seen_hashes[dedupe_hash] = now
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
 
 def is_messaging_app(app: str) -> bool:
     """Check if an app name matches a known messaging app."""
@@ -123,6 +260,92 @@ def _extract_keywords(texts: list[str], max_keywords: int = 10) -> list[str]:
     counts = Counter(filtered)
     return [word for word, _ in counts.most_common(max_keywords)]
 
+
+def _extract_decisions(texts: list[str]) -> list[str]:
+    """Extract decision-like statements from message texts."""
+    decisions: list[str] = []
+    for text in texts:
+        for sent in re.split(r'[.!?\n]', text):
+            sent = sent.strip()
+            if not sent or len(sent) < 10:
+                continue
+            if _DECISION_RE.search(sent):
+                # Clean up and cap length
+                decision = sent[:150].strip()
+                if decision and decision not in decisions:
+                    decisions.append(decision)
+    return decisions[:10]
+
+
+def _extract_dates(texts: list[str]) -> list[str]:
+    """Extract date/time references from message texts."""
+    dates: list[str] = []
+    combined = " ".join(texts)
+    for m in _DATE_RE.finditer(combined):
+        date = m.group(0).strip()
+        if date and date not in dates:
+            dates.append(date)
+    return dates[:10]
+
+
+def _extract_numbers(texts: list[str]) -> list[str]:
+    """Extract significant numbers from message texts."""
+    numbers: list[str] = []
+    combined = " ".join(texts)
+    for m in _NUMBER_RE.finditer(combined):
+        num = m.group(0).strip()
+        if num and num not in numbers:
+            numbers.append(num)
+    return numbers[:10]
+
+
+def _extract_names(speakers: list[str], texts: list[str]) -> list[str]:
+    """Extract people's names from speakers list and message text.
+
+    Looks for capitalized proper nouns that aren't common stop words.
+    """
+    names: list[str] = list(speakers)
+
+    # Find capitalized words that look like names in message text
+    # Pattern: capitalized word not at sentence start (heuristic)
+    name_re = re.compile(r'\b([A-Z][a-z]{1,15})\b')
+    combined = " ".join(texts)
+
+    for m in name_re.finditer(combined):
+        candidate = m.group(1)
+        if candidate in _NAME_STOP_WORDS:
+            continue
+        if candidate.lower() in _STOP_WORDS:
+            continue
+        # Skip if it's a very common English word that happens to be capitalized
+        if len(candidate) <= 2:
+            continue
+        if candidate not in names:
+            names.append(candidate)
+
+    # Also look for CJK names
+    for text in texts:
+        if _is_cjk_name(text.strip()):
+            name = text.strip()
+            if name not in names:
+                names.append(name)
+
+    return names[:15]
+
+
+def _compute_dedupe_hash(message_texts: list[str]) -> str:
+    """Compute a deduplication hash from message texts.
+
+    Uses the sorted set of first 50 chars of each message.
+    """
+    snippets = sorted({text[:50] for text in message_texts if text.strip()})
+    raw = "|".join(snippets)
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()[:16]
+
+
+# ---------------------------------------------------------------------------
+# Main analysis functions
+# ---------------------------------------------------------------------------
 
 def analyze_chat_screen(
     blocks: list[TextBlock], app: str, title: str,
@@ -231,3 +454,148 @@ def analyze_chat_screen(
     ctx.breadcrumb = " ".join(parts)
 
     return ctx
+
+
+def extract_conversation(
+    blocks: list[TextBlock], app: str, title: str,
+) -> ConversationExtract | None:
+    """Extract rich structured conversation data from a chat screenshot.
+
+    Returns None if the screen doesn't look like a chat, or if the
+    content was recently seen (deduplication).
+
+    This is the enhanced version of analyze_chat_screen() that extracts
+    speakers, messages, decisions, dates, numbers, and names.
+    """
+    if not blocks or len(blocks) < 3:
+        return None
+
+    # Classify blocks by horizontal position
+    incoming: list[TextBlock] = []   # left-aligned (x < 0.35)
+    outgoing: list[TextBlock] = []   # right-aligned (x > 0.55)
+    middle: list[TextBlock] = []     # timestamps, system messages
+    header: list[TextBlock] = []     # top 10% of screen
+
+    for block in blocks:
+        if block.y + block.h > 0.90:
+            header.append(block)
+            continue
+        if _is_timestamp(block.text):
+            middle.append(block)
+            continue
+        if block.x < 0.35:
+            incoming.append(block)
+        elif block.x > 0.55:
+            outgoing.append(block)
+        else:
+            middle.append(block)
+
+    total_messages = len(incoming) + len(outgoing)
+    if total_messages < 2:
+        return None
+
+    # --- Contact/channel from header ---
+    channel_or_contact = ""
+    for block in header:
+        text = block.text.strip()
+        if len(text) < 2 or text in ("<", ">", "...", "⋮"):
+            continue
+        center_x = block.x + block.w / 2
+        if 0.25 < center_x < 0.75:
+            channel_or_contact = text
+            break
+
+    if title:
+        cleaned_title = re.sub(
+            r"\s*[-–—]\s*(?:WeChat|微信|WhatsApp|Telegram|LINE|Signal|Slack)\s*$",
+            "", title, flags=re.IGNORECASE,
+        ).strip()
+        cleaned_title = re.sub(r"\s*\(\d+\)\s*$", "", cleaned_title).strip()
+        if cleaned_title:
+            channel_or_contact = cleaned_title
+
+    # --- Pair speakers with messages ---
+    # Sort all message blocks by y position (descending = top to bottom on screen)
+    sorted_incoming = sorted(incoming, key=lambda b: -b.y)
+
+    # Build speaker->message pairs for incoming messages
+    speaker_labels: dict[int, str] = {}  # msg_block id -> speaker name
+    sender_names: list[str] = []
+
+    for msg_block in sorted_incoming:
+        for block in blocks:
+            if block is msg_block:
+                continue
+            if _is_sender_label(block, msg_block):
+                name = block.text.strip()
+                if name:
+                    speaker_labels[id(msg_block)] = name
+                    if name not in sender_names:
+                        sender_names.append(name)
+                break
+
+    # Build ordered message list (by y position, ascending = most recent first)
+    all_msg_blocks = incoming + outgoing
+    all_msg_blocks.sort(key=lambda b: b.y)  # ascending y = bottom first
+
+    messages: list[dict] = []
+    for block in all_msg_blocks:
+        text = block.text.strip()
+        if not text:
+            continue
+
+        if block in outgoing:
+            speaker = "You"
+        elif id(block) in speaker_labels:
+            speaker = speaker_labels[id(block)]
+        elif sender_names:
+            # Default to last known sender for ungrouped incoming
+            speaker = sender_names[-1] if sender_names else "Unknown"
+        else:
+            speaker = "Contact"
+
+        messages.append({"speaker": speaker, "text": text})
+
+    if not messages:
+        return None
+
+    # Collect all message texts for extraction
+    all_texts = [m["text"] for m in messages]
+
+    # Build speakers list: named senders + "You" if outgoing messages exist
+    speakers = list(sender_names)
+    if outgoing and "You" not in speakers:
+        speakers.append("You")
+
+    # --- Deduplication ---
+    dedupe_hash = _compute_dedupe_hash(all_texts)
+    if _check_and_store_hash(dedupe_hash):
+        return None  # recently seen
+
+    # --- Extract structured data ---
+    decisions = _extract_decisions(all_texts)
+    dates = _extract_dates(all_texts)
+    numbers = _extract_numbers(all_texts)
+    names = _extract_names(speakers, all_texts)
+
+    # --- Topic summary ---
+    keywords = _extract_keywords(all_texts[:8], max_keywords=5)
+    topic_parts = []
+    if channel_or_contact:
+        topic_parts.append(channel_or_contact)
+    if keywords:
+        topic_parts.append(", ".join(keywords[:3]))
+    topic_summary = " — ".join(topic_parts) if topic_parts else "chat conversation"
+
+    return ConversationExtract(
+        app=app,
+        channel_or_contact=channel_or_contact,
+        speakers=speakers,
+        messages=messages[-20:],  # cap at 20 most recent
+        decisions=decisions,
+        dates_mentioned=dates,
+        names_mentioned=names,
+        numbers_mentioned=numbers,
+        topic_summary=topic_summary,
+        dedupe_hash=dedupe_hash,
+    )

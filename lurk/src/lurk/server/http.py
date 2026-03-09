@@ -204,6 +204,19 @@ class ContextServer:
         self.llm_provider: LLMProvider | None = create_provider(load_llm_config())
         if self.llm_provider:
             logger.info("LLM provider: %s (%s)", self.llm_provider.name, self.llm_provider.model)
+        # Workstream manager + engine (LLM-inferred coherent threads of work)
+        try:
+            from ..context.workstreams import WorkstreamManager
+            from ..llm.workstream_engine import WorkstreamEngine
+            self.workstream_manager = WorkstreamManager()
+            self.workstream_engine = WorkstreamEngine(llm_provider=self.llm_provider)
+            # Attach to model so prompt generation can find it
+            self.model.workstreams = self.workstream_manager
+            self.model.workstream_engine = self.workstream_engine
+        except Exception:
+            logger.debug("Could not initialize workstream engine", exc_info=True)
+            self.workstream_manager = None
+            self.workstream_engine = None
 
     def register_observer(self, observer) -> None:
         """Register a WorkflowObserver to be polled in the observer loop."""
@@ -250,6 +263,12 @@ class ContextServer:
             self.clusterer.load_from_db(conn)
         finally:
             conn.close()
+
+        # Give workstream manager a DB connection for persistence
+        if self.workstream_manager:
+            from ..store.database import DB_PATH
+            self.workstream_manager._db = str(DB_PATH)
+            self.workstream_manager._load_from_db()
 
         # Auto-discover git repos from known projects
         self.git_watcher.auto_discover_from_model(self.model)
@@ -427,8 +446,23 @@ class ContextServer:
                             self.model.process_enriched_event(event)
                             # Auto-discover git repos from file paths in events
                             self.git_watcher.register_from_enriched_event(event)
+                            # Feed events into workstream staging buffer
+                            if self.workstream_manager:
+                                self.workstream_manager.ingest_event(event)
                     finally:
                         conn.close()
+                # Periodically refresh workstreams via LLM
+                if self.workstream_engine and self.workstream_manager:
+                    if self.workstream_engine.should_refresh():
+                        try:
+                            import asyncio
+                            loop = asyncio.new_event_loop()
+                            loop.run_until_complete(
+                                self.workstream_engine.maybe_refresh(self.workstream_manager)
+                            )
+                            loop.close()
+                        except Exception:
+                            logger.debug("Workstream refresh failed", exc_info=True)
             except Exception:
                 logger.exception("Error in enrichment loop")
 
@@ -489,6 +523,13 @@ class ContextServer:
                                         files=files,
                                     ), conn)
 
+                            # Feed git diffs into workstream manager
+                            if self.workstream_manager:
+                                summary = snap.summary_text()[:500] if snap.summary_text() else ""
+                                self.workstream_manager.ingest_git_diff(
+                                    snap.project, snap.branch, summary,
+                                )
+
                             # Store snapshot to DB
                             data = snap.to_dict()
                             wf = self.clusterer.get_active_workflow()
@@ -540,6 +581,12 @@ class ContextServer:
                     try:
                         for update in updates:
                             self._apply_workflow_update(update, conn)
+                            # Bridge: feed conversation/document extracts into workstream manager
+                            if self.workstream_manager:
+                                if update.conversation_extract:
+                                    self.workstream_manager.ingest_conversation(update.conversation_extract)
+                                if update.document_extract:
+                                    self.workstream_manager.ingest_document(update.document_extract)
                             logger.debug(
                                 "Screenshot update: %s (%s)",
                                 update.breadcrumb[:60] if update.breadcrumb else "?",
@@ -784,6 +831,28 @@ class ContextServer:
                 "documents": dict(list(wf.documents.items())[-5:]),
             })
 
+        async def cold_start_prompt(request):
+            """Human-readable cold-start prompt for copy-paste into AI chat."""
+            from ..server.prompt import generate_cold_start_prompt
+            text = generate_cold_start_prompt(self.model)
+            return PlainTextResponse(text)
+
+        async def workstreams_list(request):
+            """List all active workstreams."""
+            if hasattr(self, 'workstream_manager') and self.workstream_manager:
+                return JSONResponse(self.workstream_manager.to_dict())
+            return JSONResponse({"workstreams": [], "primary": None})
+
+        async def workstream_detail(request):
+            """Get a single workstream by ID."""
+            ws_id = request.path_params.get("ws_id", "")
+            if not hasattr(self, 'workstream_manager') or not self.workstream_manager:
+                return JSONResponse({"error": "No workstreams available."}, status_code=404)
+            for ws in self.workstream_manager.workstreams:
+                if ws.id == ws_id:
+                    return JSONResponse(ws.to_dict())
+            return JSONResponse({"error": f"Workstream '{ws_id}' not found."}, status_code=404)
+
         app = Starlette(
             routes=[
                 Route("/status", status),
@@ -809,6 +878,9 @@ class ContextServer:
                 Route("/stakeholders", stakeholders_list),
                 Route("/artifacts", artifacts_list),
                 Route("/decisions", decisions_list),
+                Route("/context/cold-start", cold_start_prompt),
+                Route("/workstreams", workstreams_list),
+                Route("/workstreams/{ws_id:str}", workstream_detail),
                 Route("/", lambda r: PlainTextResponse("lurk context broker v0.1.0")),
             ],
             middleware=[
